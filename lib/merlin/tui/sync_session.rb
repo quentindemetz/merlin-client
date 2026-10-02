@@ -206,7 +206,7 @@ module Merlin
           case @session.state
           when :done then "✔ Transfer complete. Press Esc to go back."
           when :aborted then "Transfer aborted. Press Esc to go back."
-          else "✘ Transfer failed. Press Esc to go back."
+          else "✘ Transfer failed. API call details: #{app.config.log_dir}/. Press Esc to go back."
           end
         end
 

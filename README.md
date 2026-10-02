@@ -23,6 +23,16 @@ bin/merlin                            # full-screen terminal UI (same as `bin/me
 
   Nothing talks to the Merlin API while you're on the speaker's Wi-Fi. After the transfer, a second banner asks you to rejoin your usual network. The report is sent as soon as Merlin is reachable again. If you skip the wait with `enter`, the report is saved and sent at the next sync.
 
+### HTTP log
+
+Every HTTP exchange (API calls, login and token refresh, downloads, connectivity checks) is appended to `~/.config/merlin/logs/http-YYYY-MM-DD.jsonl`. Each line is one exchange: id, time, method, URL, request headers and body, response status, headers and body, duration, or the network error. Files are mode 0600 and kept for 14 days. `-v` also prints one summary line per call. Example query: `jq 'select(.response.status >= 400 or .error)' ~/.config/merlin/logs/http-*.jsonl`.
+
+Redaction happens before anything is written, and before truncation:
+
+* **Removed:** tokens, passwords (account, speaker and home Wi-Fi), `Authorization` and cookie headers, signed-URL parameters, email and username, home Wi-Fi SSID, speaker names, MAC addresses. Email addresses and JWTs inside free text are replaced too.
+* **Kept:** speaker access-point names (`MERLIN_…`), ids, catalog data.
+* **Bodies:** API bodies are logged in full, up to 1 MB. Streamed text or JSON is logged up to 256 KB. Binary downloads are summarised as size, content type and SHA-256.
+
 All HTTP goes through Faraday with a 10 s timeout. That covers connecting and each read or write, so long downloads still work. Network failures surface as "can't reach … — is this Mac still on the speaker's Wi-Fi?" rather than crashing the app.
 
 Keys everywhere: `↑↓`/`j k`, `PgUp`/`PgDn`, `enter`, `esc` back, and `q` quits from the menu.

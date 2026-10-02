@@ -30,12 +30,15 @@ module Merlin
     attr_accessor :setting_id
 
     # token_store: object responding to #load and #save(hash) (see TokenStore).
-    def initialize(token_store:, setting_id: nil, logger: nil)
+    # http_log: HttpLog recording every exchange (redacted), or nil.
+    def initialize(token_store:, setting_id: nil, http_log: nil)
       @token_store = token_store
       @tokens = token_store.load
       @setting_id = setting_id
-      @logger = logger
+      @http_log = http_log
     end
+
+    attr_reader :http_log
 
     def logged_in? = !@tokens.nil?
 
@@ -150,7 +153,6 @@ module Merlin
       headers["Authorization"] = "Bearer #{@tokens['access_token']}" if @tokens
       headers["X-Setting-Id"] = setting_id.to_s if setting_id
       headers["Content-Type"] = "application/json" if body
-      log("#{verb.upcase} #{url}")
       res = perform(url) { connection.run_request(verb, url, body && JSON.generate(body), headers) }
 
       if res.status == 401 && @tokens && !retried
@@ -224,7 +226,10 @@ module Merlin
     API_TIMEOUT = 10
 
     def connection(timeout: API_TIMEOUT)
-      Faraday.new(headers: APP_HEADERS, request: { timeout: timeout, open_timeout: timeout })
+      Faraday.new(headers: APP_HEADERS, request: { timeout: timeout, open_timeout: timeout }) do |f|
+        f.use HttpLog::Middleware, @http_log if @http_log
+        f.adapter Faraday.default_adapter
+      end
     end
 
     # Transport failures (DNS, refused/reset connections, timeouts, TLS) become
@@ -236,7 +241,6 @@ module Merlin
       raise OfflineError, "can't reach #{host} (#{e.message}) — is this Mac still on the speaker's Wi-Fi?"
     end
 
-    def log(msg) = @logger&.call(msg)
   end
 
   # Persists OAuth tokens (never the password) in a 0600 JSON file.

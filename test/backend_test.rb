@@ -58,14 +58,14 @@ class BackendTest < Minitest::Test
         next [401, '{"error_description":"Invalid user credentials"}'] if form["password"] == "bad"
 
         @access = form["grant_type"] == "refresh_token" ? "tok2" : "tok1"
-        [200, JSON.generate(access_token: @access, refresh_token: "r", expires_in: 300, refresh_expires_in: 1800)]
+        [200, JSON.generate(access_token: @access, refresh_token: "refresh-SECRET-123", expires_in: 300, refresh_expires_in: 1800)]
       elsif req[:headers]["authorization"] != "Bearer #{@access}" || @expire_next
         @expire_next = false
         [401, "{}"]
       elsif req[:path] == "/api/v1/synchros" && req[:verb] == "POST"
-        [200, JSON.generate(id: "s1", type: "TRANSFERT", fileList: [], playlistText: "[]")]
+        [200, JSON.generate(id: "s1", type: "TRANSFERT", fileList: [], playlistText: "[]", ssid: "MERLIN_KH2755", password: "ap-pass-777", pendingSsid: "HomeNet-42", pendingPassword: "home-pass-888")]
       elsif req[:path] == "/api/v1/configs/multi"
-        [200, JSON.generate(home_page_id: "home-1", settings: [{ id: "set-9", speaker_name: "Merlin" }])]
+        [200, JSON.generate(home_page_id: "home-1", settings: [{ id: "set-9", speaker_name: "Chambre de Lea", mac_address: "170:187:204:1:2:3" }])]
       elsif req[:path].start_with?("/api/v1/selections")
         [200, JSON.generate([{ add: true, selection: true, content: { id: "c1", title: "Le loup" } }])]
       elsif req[:path].start_with?("/api/v1/")
@@ -159,6 +159,77 @@ class BackendTest < Minitest::Test
     conn = @backend.send(:connection)
     assert_equal [10, 10], [conn.options.timeout, conn.options.open_timeout]
     assert_equal Merlin::Backend::USER_AGENT, conn.headers["User-Agent"]
+  end
+
+  SECRETS = %w[kid@example.com s3cret-PW tok1 tok2 refresh-SECRET-123 ap-pass-777 home-pass-888
+               HomeNet-42 Chambre\ de\ Lea 170:187:204:1:2:3 sigABC123].freeze
+
+  def logged_backend(echo: nil)
+    @log_dir = File.join(@dir, "logs")
+    Merlin::Backend.new(token_store: Merlin::TokenStore.new(File.join(@dir, "t2.json")), setting_id: "set-9",
+                        http_log: Merlin::HttpLog.new(dir: @log_dir, echo: echo))
+  end
+
+  def log_entries
+    files = Dir[File.join(@log_dir, "http-*.jsonl")]
+    assert_equal 1, files.size
+    @raw_log = File.read(files.first)
+    @raw_log.lines.map { JSON.parse(_1) }
+  end
+
+  def test_http_log_records_every_exchange_without_secrets_or_pii
+    echoed = []
+    backend = logged_backend(echo: ->(line) { echoed << line })
+    backend.login("kid@example.com", "s3cret-PW")
+    backend.speakers
+    backend.create_synchro
+    @expire_next = true # 401 -> refresh -> retry, all logged
+    backend.report_synchro("s1", { status: "FAIL", logs: ["upload failed for kid@example.com"], mac_address: "170:187:204:1:2:3" })
+    backend.download("http://127.0.0.1:#{@server.port}/plain/cover.jpg?w=128&signature=sigABC123", File.join(@dir, "c.jpg"))
+
+    entries = log_entries
+    SECRETS.each { |secret| refute_includes @raw_log, secret, "secret/PII leaked into the HTTP log" }
+
+    # One entry per exchange: login, configs, synchros, PUT 401, refresh, PUT retry, download
+    assert_equal %w[POST GET POST PUT POST PUT GET], entries.map { _1.dig("request", "method") }
+    assert(entries.all? { _1["response"]["status"] && _1["duration_ms"] && _1["id"] && _1["at"] })
+
+    login = entries[0]
+    assert_equal({ "client_id" => "app", "grant_type" => "password", "username" => "[REDACTED]", "password" => "[REDACTED]" },
+                 login.dig("request", "body"))
+    assert_equal ["[REDACTED]", "[REDACTED]", 300], login.dig("response", "body").values_at("access_token", "refresh_token", "expires_in")
+
+    config = entries[1]
+    assert_equal "[REDACTED]", config.dig("request", "headers", "Authorization")
+    assert_equal "set-9", config.dig("request", "headers", "X-Setting-Id")
+    assert_equal({ "id" => "set-9", "speaker_name" => "[REDACTED]", "mac_address" => "[REDACTED]" },
+                 config.dig("response", "body", "settings", 0))
+
+    plan = entries[2].dig("response", "body")
+    assert_equal ["s1", "MERLIN_KH2755", "[REDACTED]", "[REDACTED]", "[REDACTED]"],
+                 plan.values_at("id", "ssid", "password", "pendingSsid", "pendingPassword")
+    assert_equal "PENDING", entries[2].dig("request", "body", "status")
+
+    assert_equal 401, entries[3].dig("response", "status")
+    assert_equal ["upload failed for [EMAIL]"], entries[5].dig("request", "body", "logs")
+
+    dl = entries[6]
+    assert_includes dl.dig("request", "url"), "signature=%5BREDACTED%5D"
+    assert_equal [200, 4, "JPEG"], dl["response"].values_at("status", "streamed_bytes", "body")
+
+    assert_match(%r{\APOST http://127\.0\.0\.1:\d+/api/v1/synchros -> 200 \[\d+ms\]\z}, echoed[2])
+    assert_equal 0o600, File.stat(Dir[File.join(@log_dir, "*.jsonl")].first).mode & 0o777
+  end
+
+  def test_http_log_records_network_errors
+    closed_port = TCPServer.new("127.0.0.1", 0).then { |s| s.addr[1].tap { s.close } }
+    stub_const(:API_BASE, "http://127.0.0.1:#{closed_port}/api/v1/")
+    backend = logged_backend
+    assert_raises(Merlin::OfflineError) { backend.selections }
+    entry = log_entries.last
+    assert_equal "GET", entry.dig("request", "method")
+    assert_match(/Faraday::ConnectionFailed/, entry["error"])
+    assert_nil entry["response"]
   end
 
   def test_catalog_endpoints

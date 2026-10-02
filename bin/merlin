@@ -60,6 +60,7 @@ module Merlin
       send(method, *@argv)
     rescue Error, ArgumentError => e
       warn "Error: #{e.message}"
+      warn "Details of every API call: #{File.join(config.log_dir, "http-#{Date.today.iso8601}.jsonl")}" if e.is_a?(BackendError)
       exit 1
     rescue Interrupt
       warn "\nInterrupted."
@@ -131,7 +132,7 @@ module Merlin
     def cmd_tui
       require_relative "../lib/merlin/tui"
       # The TUI owns the screen: no stderr logging, speaker host/port still apply.
-      TUI::App.new(backend: Backend.new(token_store: config.token_store), config: config,
+      TUI::App.new(backend: Backend.new(token_store: config.token_store, http_log: config.http_log), config: config,
                    speaker_opts: { host: @opts[:host], port: @opts[:port] }).run
     end
 
@@ -254,7 +255,7 @@ module Merlin
     end
 
     def backend
-      @backend ||= Backend.new(token_store: config.token_store, logger: logger)
+      @backend ||= Backend.new(token_store: config.token_store, http_log: config.http_log(echo: logger))
     end
 
     def config = @config ||= Config.new

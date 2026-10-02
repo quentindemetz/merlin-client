@@ -19,6 +19,10 @@ module Merlin
 
     def token_store = TokenStore.new(File.join(home, "tokens.json"))
     def cache_dir = File.join(home, "cache")
+    def log_dir = File.join(home, "logs")
+
+    # echo: optional ->(line) receiving a one-line summary per exchange.
+    def http_log(echo: nil) = HttpLog.new(dir: log_dir, echo: echo)
 
     def settings
       @settings ||= File.exist?(settings_path) ? JSON.parse(File.read(settings_path)) : {}
