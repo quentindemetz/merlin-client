@@ -2,6 +2,7 @@
 
 source "https://rubygems.org"
 
+gem "faraday", "~> 2.12"
 gem "ratatui_ruby", "~> 1.5"
 
 group :test do

@@ -86,6 +86,9 @@ module Merlin
 
       def refresh_basket_count
         @basket_count = logged_in? && config.setting_id ? Array(backend.selections).size : nil
+      rescue OfflineError => e
+        @basket_count = nil
+        error(e.message)
       rescue Error
         @basket_count = nil
       end

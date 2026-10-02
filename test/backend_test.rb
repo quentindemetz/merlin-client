@@ -49,6 +49,10 @@ class BackendTest < Minitest::Test
     @dir = Dir.mktmpdir
     @access = "tok1"
     @server = TinyHTTP.new do |req|
+      if req[:path].start_with?("/plain/") # CDN download: no auth expected
+        next [200, "JPEG"]
+      end
+
       if req[:path].end_with?("/token")
         form = URI.decode_www_form(req[:body]).to_h
         next [401, '{"error_description":"Invalid user credentials"}'] if form["password"] == "bad"
@@ -118,6 +122,43 @@ class BackendTest < Minitest::Test
     err = assert_raises(Merlin::BackendError) { @backend.login("a", "bad") }
     assert_match(/Invalid user credentials/, err.message)
     refute @backend.logged_in?
+  end
+
+  def test_download_tolerates_raw_spaces_and_accents_in_urls
+    dest = File.join(@dir, "img.jpg")
+    @backend.download("http://127.0.0.1:#{@server.port}/plain/https://x/10 histoires de j'aime lire é.jpg@jpg", dest)
+    assert_equal "/plain/https://x/10%20histoires%20de%20j'aime%20lire%20%C3%A9.jpg@jpg", @server.requests.last[:path]
+    assert File.exist?(dest)
+  end
+
+  def test_unreachable_host_raises_offline_error
+    closed_port = TCPServer.new("127.0.0.1", 0).then { |s| s.addr[1].tap { s.close } }
+    stub_const(:API_BASE, "http://127.0.0.1:#{closed_port}/api/v1/")
+    @backend.login("a", "pw")
+    err = assert_raises(Merlin::OfflineError) { @backend.selections }
+    assert_match(/can't reach 127\.0\.0\.1.*speaker's Wi-Fi/, err.message)
+    assert @backend.logged_in?, "losing the network must not log the user out"
+    refute @backend.reachable?
+  end
+
+  def test_silent_server_times_out_quickly
+    silent = TCPServer.new("127.0.0.1", 0)
+    hold = Thread.new { loop { (@held ||= []) << silent.accept } }
+    stub_const(:API_BASE, "http://127.0.0.1:#{silent.addr[1]}/api/v1/")
+    stub_const(:API_TIMEOUT, 1)
+    @backend.login("a", "pw")
+    started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    assert_raises(Merlin::OfflineError) { @backend.selections }
+    assert_operator Process.clock_gettime(Process::CLOCK_MONOTONIC) - started, :<, 3
+  ensure
+    hold&.kill
+    silent&.close
+  end
+
+  def test_api_timeout_is_ten_seconds
+    conn = @backend.send(:connection)
+    assert_equal [10, 10], [conn.options.timeout, conn.options.open_timeout]
+    assert_equal Merlin::Backend::USER_AGENT, conn.headers["User-Agent"]
   end
 
   def test_catalog_endpoints

@@ -15,6 +15,7 @@ module Merlin
     end
 
     def join_speaker(ssid, password)
+      @speaker_ssid = ssid
       if @auto && ssid
         @home_ssid ||= current_ssid
         @out.puts "Joining speaker Wi-Fi #{ssid.inspect} on #{interface}..."
@@ -28,16 +29,35 @@ module Merlin
       end
     end
 
+    # Get back onto a network with internet access (the caller then waits for
+    # the Merlin API to be reachable before reporting).
     def restore
-      return unless @auto && @home_ssid
+      return manual_restore unless @auto
 
-      @out.puts "Rejoining #{@home_ssid.inspect}..."
-      run!("networksetup", "-setairportnetwork", interface, @home_ssid)
+      # Forget the speaker AP so macOS doesn't auto-join it again.
+      Open3.capture2e("networksetup", "-removepreferredwirelessnetwork", interface, @speaker_ssid) if @speaker_ssid
+      if @home_ssid
+        @out.puts "Rejoining #{@home_ssid.inspect}..."
+        run!("networksetup", "-setairportnetwork", interface, @home_ssid)
+      else
+        # macOS redacts the current SSID without Location access: cycling
+        # Wi-Fi makes it auto-join the preferred (home) network instead.
+        @out.puts "Reconnecting Wi-Fi to your usual network..."
+        run!("networksetup", "-setairportpower", interface, "off")
+        sleep 3
+        run!("networksetup", "-setairportpower", interface, "on")
+      end
     rescue Error => e
-      @out.puts "Could not rejoin #{@home_ssid}: #{e.message} (reconnect manually)"
+      @out.puts "Could not reconnect automatically: #{e.message} (reconnect manually)"
     end
 
     private
+
+    def manual_restore
+      @out.puts
+      @out.print "Transfer finished with the speaker. Reconnect this Mac to your usual Wi-Fi, then press Enter... "
+      @input.gets
+    end
 
     def interface
       @interface ||= begin

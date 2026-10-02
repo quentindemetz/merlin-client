@@ -24,13 +24,15 @@ module Merlin
       end
     end
 
-    def initialize(backend:, cache_dir:, wifi:, speaker_opts: {}, out: $stdout, dry_run: false)
+    def initialize(backend:, cache_dir:, wifi:, speaker_opts: {}, out: $stdout, dry_run: false,
+                   internet_wait: 180)
       @backend = backend
       @cache_dir = cache_dir
       @wifi = wifi
       @speaker_opts = speaker_opts
       @out = out
       @dry_run = dry_run
+      @internet_wait = internet_wait
       @logs = []
     end
 
@@ -43,12 +45,17 @@ module Merlin
       save_json("last_synchro.json", plan)
       say "Synchro #{id}: #{plan.fetch('fileList', []).size} file(s) in plan"
 
-      files = prepare_files(plan)
-      playlist = write_playlist(plan)
-      return plan if @dry_run
+      return prepare_files(plan) && write_playlist(plan) && plan if @dry_run
 
+      # From here on every outcome is reported, so the synchro never stays PENDING.
       report = { type: type }
+      offline = false
       begin
+        files = prepare_files(plan)
+        playlist = write_playlist(plan)
+        # No Merlin API call may happen from here until we're back online:
+        # the speaker's access point has no internet.
+        offline = true
         @wifi.join_speaker(plan["ssid"], plan["password"])
         transfer(plan, files, playlist, report)
         report.merge!(status: "SUCCESS", status_code: "100_SUCCEED")
@@ -63,10 +70,26 @@ module Merlin
         fail_report(report, "900_FAILED_ON_UNKNOW_ERROR", "#{e.class}: #{e.message}")
         raise
       ensure
-        @wifi.restore
-        send_report(id, report)
+        # restore returns :skip when the user chose not to wait for internet.
+        online = !offline || (@wifi.restore != :skip && wait_for_internet)
+        online ? send_report(id, report) : save_pending_report(id, report)
       end
       plan
+    end
+
+    # After leaving the speaker's Wi-Fi, give the network time to come back
+    # before reporting; if it doesn't, send_report saves the report for later.
+    def wait_for_internet
+      return true if @backend.reachable?
+
+      say "Waiting for internet access to send the report to Merlin..."
+      deadline = Time.now + @internet_wait
+      until @backend.reachable?
+        return false if Time.now > deadline
+
+        sleep 3
+      end
+      true
     end
 
     private
@@ -85,7 +108,7 @@ module Merlin
       end
       log "Prepare synchro content files succeed"
       files
-    rescue BackendError, SystemCallError => e
+    rescue BackendError, SystemCallError, IOError, URI::Error => e # transport errors arrive as OfflineError
       raise Failure.new("202_FAILED_ON_PREPARE_CONTENT_FILES", e.message)
     end
 
@@ -230,8 +253,12 @@ module Merlin
       rescue BackendError, SystemCallError, SocketError, IOError => e
         @last_report_error = e
       end
-      save_json("pending_report.json", { "id" => id, "body" => body })
-      say "Could not send report (#{@last_report_error&.message}); it will be retried on the next sync."
+      save_pending_report(id, report, reason: @last_report_error&.message)
+    end
+
+    def save_pending_report(id, report, reason: "still offline")
+      save_json("pending_report.json", { "id" => id, "body" => report.merge(logs: @logs.last(200)) })
+      say "Report not sent (#{reason}); it will be sent at the next sync."
     end
 
     def resend_pending_report

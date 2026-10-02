@@ -23,6 +23,11 @@ class TUITest < Minitest::Test
 
     def logged_in? = @logged_in
 
+    # Simulates the laptop being on the speaker's (internet-less) Wi-Fi.
+    attr_accessor :online
+
+    def reachable? = @online != false
+
     def login(email, password)
       @calls << [:login, email, password]
       raise Merlin::BackendError, "authentication failed" if password == "bad"
@@ -37,7 +42,11 @@ class TUITest < Minitest::Test
 
     def speakers = @speakers_list
     def home_page_id = "home"
-    def selections = @basket
+    def selections
+      raise Merlin::OfflineError, "can't reach api.hello-merlin.com" unless reachable?
+
+      @basket
+    end
 
     def page(id)
       @calls << [:page, id]
@@ -218,6 +227,63 @@ class TUITest < Minitest::Test
       refute_includes app_text, "50%"
     end
     assert_equal :done, sync_screen.session.state
+  end
+
+  # Goes offline while "on the speaker", then the user leaves the sync screen
+  # before reconnecting — this used to crash the TUI (Socket::ResolutionError).
+  class OfflineSync
+    def initialize(out:, wifi:, backend:)
+      @out = out
+      @wifi = wifi
+      @backend = backend
+    end
+
+    def run
+      @wifi.join_speaker("MERLIN_DKCRG8", "pw")
+      @backend.online = false
+      @out.puts "  [audio 1/1] a.mp3 uploaded"
+      @out.puts(@wifi.restore == :skip ? "Report saved for next sync." : "Report sent.")
+    end
+  end
+
+  def test_back_to_menu_while_offline_does_not_crash
+    @config.setting_id = "s1"
+    backend = FakeBackend.new
+    sync_screen = nil
+    pressed = []
+    stop = lambda do |a|
+      sync_screen = a.screen if a.screen.is_a?(Merlin::TUI::Screens::SyncScreen)
+      wifi = sync_screen&.session&.wifi
+      if wifi&.waiting && !pressed.include?(:join) && screen_text.include?("MERLIN_DKCRG8")
+        inject_keys(:enter) && pressed << :join
+      elsif wifi&.reconnecting && !pressed.include?(:skip) && screen_text.include?("Back to your usual Wi-Fi")
+        inject_keys(:enter) && pressed << :skip # don't wait for internet
+      elsif sync_screen&.session&.finished? && !pressed.include?(:esc)
+        inject_keys(:esc) && pressed << :esc # back to the menu while still offline
+      end
+      a.screen.is_a?(Merlin::TUI::Screens::MainMenu) && pressed.include?(:esc)
+    end
+    with_test_terminal(100, 30) do
+      inject_keys(:end, :up, :enter, :enter)
+      app(backend, sync_factory: ->(out:, wifi:) { OfflineSync.new(out: out, wifi: wifi, backend: backend) })
+        .run(stop_when: stop)
+      assert_includes screen_text, "can't reach api.hello-merlin.com"
+      assert_includes screen_text, "Sync now"
+    end
+    assert_equal %i[join skip esc], pressed
+    assert_includes sync_screen.session.log.lines, "Report saved for next sync."
+  end
+
+  def test_reconnect_banner_clears_by_itself_once_online
+    online_after = Time.now + 0.5
+    wifi = Merlin::TUI::TuiWifi.new(auto: false, log: Merlin::TUI::SyncLog.new, online: -> { Time.now > online_after })
+    seen = nil
+    t = Thread.new { wifi.restore }
+    sleep 0.1
+    seen = wifi.reconnecting
+    assert_equal :online, t.value
+    assert seen
+    refute wifi.reconnecting
   end
 
   def test_sync_log_handles_carriage_returns

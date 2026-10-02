@@ -1,6 +1,6 @@
 # frozen_string_literal: true
 
-require "net/http"
+require "faraday"
 require "json"
 require "uri"
 require "fileutils"
@@ -14,6 +14,10 @@ module Merlin
       @status = status
     end
   end
+
+  # No route to the Merlin servers — typically because the Mac is on the
+  # speaker's (internet-less) Wi-Fi.
+  class OfflineError < BackendError; end
 
   # Client for the Hello Merlin cloud API (the app's Retrofit services).
   class Backend
@@ -34,6 +38,14 @@ module Merlin
     end
 
     def logged_in? = !@tokens.nil?
+
+    # Cheap connectivity probe (the app does the same HEAD on the API base).
+    def reachable?(timeout: 4)
+      perform(API_BASE) { connection(timeout: timeout).head(API_BASE) }
+      true
+    rescue OfflineError
+      false
+    end
 
     # --- Auth (Keycloak) -----------------------------------------------------
 
@@ -69,12 +81,33 @@ module Merlin
     end
 
     # File URLs in a synchro plan are fetched without auth, like the app does.
-    def download(url, dest)
+    # Streams to disk; the timeout bounds each read, so large MP3s are fine.
+    def download(url, dest, redirects: 5)
       FileUtils.mkdir_p(File.dirname(dest))
       tmp = "#{dest}.part"
-      fetch_to_file(URI(url), tmp)
-      File.rename(tmp, dest)
-      dest
+      url = lenient_url(url)
+      loop do
+        res = File.open(tmp, "wb") do |f|
+          perform(url) do
+            connection.get(url) do |req|
+              # Only keep the body of the final 2xx response, not redirect pages.
+              req.options.on_data = proc { |chunk, _size, env| f.write(chunk) if env.status.to_i.between?(200, 299) }
+            end
+          end
+        end
+        if res.status.between?(300, 399) && res.headers["location"]
+          raise BackendError, "download #{url}: too many redirects" if (redirects -= 1).negative?
+
+          url = URI.join(url, lenient_url(res.headers["location"])).to_s
+          next
+        end
+        raise BackendError.new("download #{url} -> HTTP #{res.status}", status: res.status) unless res.success?
+
+        File.rename(tmp, dest)
+        return dest
+      end
+    ensure
+      FileUtils.rm_f(tmp) if tmp && File.exist?(tmp)
     end
 
     # --- Catalog -------------------------------------------------------------
@@ -112,25 +145,20 @@ module Merlin
 
     def api(verb, path, body = nil, retried: false)
       refresh! if @tokens && Time.now.to_i >= @tokens["expires_at"].to_i
-      uri = URI.join(API_BASE, path)
-      req = { get: Net::HTTP::Get, post: Net::HTTP::Post, put: Net::HTTP::Put,
-              delete: Net::HTTP::Delete }.fetch(verb).new(uri)
-      app_headers(req)
-      req["Authorization"] = "Bearer #{@tokens['access_token']}" if @tokens
-      req["X-Setting-Id"] = setting_id.to_s if setting_id
-      if body
-        req["Content-Type"] = "application/json"
-        req.body = JSON.generate(body)
-      end
-      log("#{verb.upcase} #{uri}")
-      res = http(uri) { |h| h.request(req) }
+      url = URI.join(API_BASE, path).to_s
+      headers = {}
+      headers["Authorization"] = "Bearer #{@tokens['access_token']}" if @tokens
+      headers["X-Setting-Id"] = setting_id.to_s if setting_id
+      headers["Content-Type"] = "application/json" if body
+      log("#{verb.upcase} #{url}")
+      res = perform(url) { connection.run_request(verb, url, body && JSON.generate(body), headers) }
 
-      if res.code == "401" && @tokens && !retried
+      if res.status == 401 && @tokens && !retried
         refresh!
         return api(verb, path, body, retried: true)
       end
-      unless res.is_a?(Net::HTTPSuccess)
-        raise BackendError.new("#{verb.upcase} #{path} -> HTTP #{res.code}: #{res.body.to_s[0, 300]}", status: res.code.to_i)
+      unless res.success?
+        raise BackendError.new("#{verb.upcase} #{path} -> HTTP #{res.status}: #{res.body.to_s[0, 300]}", status: res.status)
       end
 
       res.body.to_s.strip.empty? ? nil : JSON.parse(res.body)
@@ -149,14 +177,13 @@ module Merlin
     end
 
     def token_request(**form)
-      uri = URI(TOKEN_URL)
-      req = Net::HTTP::Post.new(uri)
-      app_headers(req)
-      req.set_form_data({ client_id: "app" }.merge(form))
-      res = http(uri) { |h| h.request(req) }
-      unless res.is_a?(Net::HTTPSuccess)
+      res = perform(TOKEN_URL) do
+        connection.post(TOKEN_URL, URI.encode_www_form({ client_id: "app" }.merge(form)),
+                        "Content-Type" => "application/x-www-form-urlencoded")
+      end
+      unless res.success?
         detail = (JSON.parse(res.body)["error_description"] rescue res.body.to_s[0, 200])
-        raise BackendError.new("authentication failed (HTTP #{res.code}): #{detail}", status: res.code.to_i)
+        raise BackendError.new("authentication failed (HTTP #{res.status}): #{detail}", status: res.status)
       end
       JSON.parse(res.body)
     end
@@ -173,37 +200,40 @@ module Merlin
       @tokens
     end
 
-    def fetch_to_file(uri, path, redirects: 5)
-      http(uri) do |h|
-        req = Net::HTTP::Get.new(uri)
-        app_headers(req)
-        h.request(req) do |res|
-          case res
-          when Net::HTTPRedirection
-            raise BackendError, "too many redirects" if redirects.zero?
-
-            return fetch_to_file(URI.join(uri, res["location"]), path, redirects: redirects - 1)
-          when Net::HTTPSuccess
-            File.open(path, "wb") { |f| res.read_body { |chunk| f.write(chunk) } }
-          else
-            raise BackendError.new("download #{uri} -> HTTP #{res.code}", status: res.code.to_i)
-          end
-        end
-      end
-    end
-
     def seg(value) = URI.encode_uri_component(value.to_s)
 
-    def app_headers(req)
-      req["User-Agent"] = USER_AGENT
-      req["X-Merlin-App-Version"] = APP_VERSION
-      req["X-Merlin-App-Build"] = APP_BUILD
-      req["X-Merlin-OS"] = "Android"
-      req["X-Merlin-OS-Version"] = "14"
+    # The API hands out URLs with raw spaces / accents (imgproxy URLs embedding
+    # file names); OkHttp tolerates them, URI() doesn't. Percent-encode only
+    # characters that are never valid in a URI, leaving existing escapes alone.
+    def lenient_url(url)
+      url.to_s.gsub(%r{[^A-Za-z0-9\-._~:/?#\[\]@!$&'()*+,;=%]}) { |c| c.bytes.map { |b| format("%%%02X", b) }.join }
     end
 
-    def http(uri, &)
-      Net::HTTP.start(uri.host, uri.port, use_ssl: uri.scheme == "https", open_timeout: 15, read_timeout: 120, &)
+    APP_HEADERS = {
+      "User-Agent" => USER_AGENT,
+      "X-Merlin-App-Version" => APP_VERSION,
+      "X-Merlin-App-Build" => APP_BUILD,
+      "X-Merlin-OS" => "Android",
+      "X-Merlin-OS-Version" => "14"
+    }.freeze
+
+    # Every HTTP call goes through Faraday with a short timeout. With the
+    # Net::HTTP adapter it bounds the connect and each socket read/write, so a
+    # dead network (e.g. the speaker's access point) fails fast while long
+    # downloads that keep making progress are unaffected.
+    API_TIMEOUT = 10
+
+    def connection(timeout: API_TIMEOUT)
+      Faraday.new(headers: APP_HEADERS, request: { timeout: timeout, open_timeout: timeout })
+    end
+
+    # Transport failures (DNS, refused/reset connections, timeouts, TLS) become
+    # OfflineError; HTTP statuses are left to the caller.
+    def perform(url)
+      yield
+    rescue Faraday::ConnectionFailed, Faraday::TimeoutError, Faraday::SSLError => e
+      host = (URI(url).host rescue url)
+      raise OfflineError, "can't reach #{host} (#{e.message}) — is this Mac still on the speaker's Wi-Fi?"
     end
 
     def log(msg) = @logger&.call(msg)

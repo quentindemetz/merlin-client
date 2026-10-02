@@ -37,10 +37,13 @@ module Merlin
     # Stands in for Merlin::Wifi inside the TUI: instead of reading stdin it
     # waits until the user confirms on the sync screen.
     class TuiWifi
-      attr_reader :waiting
+      # waiting: speaker AP details while we wait for the user to join it.
+      # reconnecting: true while we wait for the user to get back online.
+      attr_reader :waiting, :reconnecting
 
-      def initialize(auto:, log:)
+      def initialize(auto:, log:, online: -> { true })
         @queue = Queue.new
+        @online = online
         @real = Wifi.new(auto: true, out: log) if auto
       end
 
@@ -53,11 +56,23 @@ module Merlin
         @waiting = nil
       end
 
-      def confirm
-        @queue << true if @waiting
+      # Returns once the Merlin API is reachable again (polled), or when the
+      # user presses Enter.
+      def restore
+        return @real.restore if @real
+
+        @reconnecting = true
+        until @online.call
+          return :skip if @queue.pop(timeout: 3)
+        end
+        :online
+      ensure
+        @reconnecting = false
       end
 
-      def restore = @real&.restore
+      def confirm
+        @queue << true if @waiting || @reconnecting
+      end
     end
 
     # One synchronisation running in a background thread.
@@ -66,7 +81,7 @@ module Merlin
 
       def initialize(app, auto_wifi:)
         @log = SyncLog.new
-        @wifi = TuiWifi.new(auto: auto_wifi, log: @log)
+        @wifi = TuiWifi.new(auto: auto_wifi, log: @log, online: -> { app.backend.reachable? })
         @sync = app.new_sync(out: @log, wifi: @wifi)
         @state = :idle
       end
@@ -110,6 +125,7 @@ module Merlin
           return [%w[↑↓ move], %w[enter select], %w[esc back]] unless @session
           return [%w[esc back]] if @session.finished?
           return [["enter", "I'm on the speaker Wi-Fi"], %w[ctrl-c abort]] if @session.wifi.waiting
+          return [["enter", "skip waiting"]] if @session.wifi.reconnecting
 
           [%w[ctrl-c abort]]
         end
@@ -155,15 +171,12 @@ module Merlin
           return super unless @session
 
           log_area = area
-          if (w = @session.wifi.waiting)
-            banner, log_area = tui.layout_split(area, direction: :vertical,
-                                                      constraints: [tui.constraint_length(6), tui.constraint_fill(1)])
-            text = ["Switch the speaker on and press its Wifi / Transfert button,",
-                    "then join its Wi-Fi network: #{w[:ssid] || 'MERLIN…'}#{"   password: #{w[:password]}" if w[:password]}",
-                    "", "Press Enter once your laptop is connected."]
+          if (title, text = banner)
+            box, log_area = tui.layout_split(area, direction: :vertical,
+                                                   constraints: [tui.constraint_length(6), tui.constraint_fill(1)])
             frame.render_widget(tui.paragraph(text: text.join("\n"), style: app.style(fg: :yellow),
-                                              block: tui.block(title: " Join the speaker Wi-Fi ", borders: [:all],
-                                                               border_style: app.style(fg: :yellow))), banner)
+                                              block: tui.block(title: " #{title} ", borders: [:all],
+                                                               border_style: app.style(fg: :yellow))), box)
           end
           lines = @session.log.lines
           lines += ["", result_line] if @session.finished?
@@ -174,6 +187,20 @@ module Merlin
         end
 
         private
+
+        def banner
+          if (w = @session.wifi.waiting)
+            ["Join the speaker Wi-Fi",
+             ["Switch the speaker on and press its Wifi / Transfert button,",
+              "then join its Wi-Fi network: #{w[:ssid] || 'MERLIN…'}#{"   password: #{w[:password]}" if w[:password]}",
+              "", "Press Enter once your laptop is connected."]]
+          elsif @session.wifi.reconnecting
+            ["Back to your usual Wi-Fi",
+             ["Done with the speaker. Reconnect this Mac to your usual Wi-Fi network.",
+              "The report is sent to Merlin automatically as soon as it's reachable.",
+              "", "Press Enter to stop waiting (the report will then be sent at the next sync)."]]
+          end
+        end
 
         def result_line
           case @session.state
