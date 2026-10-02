@@ -8,10 +8,10 @@ require_relative "../lib/merlin"
 
 module Merlin
   class CLI
-    HOME = ENV.fetch("MERLIN_HOME", File.join(Dir.home, ".config", "merlin"))
-
     USAGE = <<~TXT
       Usage: merlin [options] <command> [args]
+
+        tui                        Full-screen interface (default when no command is given)
 
       Account (Hello Merlin cloud):
         login [EMAIL]              Log in (password prompted, or $MERLIN_PASSWORD)
@@ -54,7 +54,7 @@ module Merlin
 
     def run
       parser.parse!(@argv)
-      cmd = @argv.shift or abort(parser.help)
+      cmd = @argv.shift || ($stdout.tty? ? "tui" : abort(parser.help))
       method = "cmd_#{cmd.tr('-', '_')}"
       abort("Unknown command: #{cmd}\n\n#{parser.help}") unless respond_to?(method, true)
       send(method, *@argv)
@@ -91,8 +91,8 @@ module Merlin
       backend.login(email, password)
       puts "Logged in."
       list = backend.speakers
-      if list.size == 1 && !settings["setting_id"]
-        save_settings("setting_id" => list.first["id"])
+      if list.size == 1 && !config.setting_id
+        config.setting_id = list.first["id"]
         puts "Using speaker #{list.first['speaker_name'].inspect}."
       elsif list.size > 1
         puts "Several speakers on this account; pick one with `merlin use ID` (see `merlin speakers`)."
@@ -114,7 +114,7 @@ module Merlin
     end
 
     def cmd_use(id)
-      save_settings("setting_id" => id)
+      config.setting_id = id
       puts "Selected speaker #{id}."
     end
 
@@ -123,9 +123,16 @@ module Merlin
 
       backend.setting_id = setting_id
       wifi = Wifi.new(auto: @opts[:auto_wifi], interface: @opts[:iface], home_ssid: @opts[:home_ssid])
-      plan = Sync.new(backend: backend, cache_dir: File.join(HOME, "cache"), wifi: wifi,
+      plan = Sync.new(backend: backend, cache_dir: config.cache_dir, wifi: wifi,
                       speaker_opts: speaker_opts, dry_run: @opts[:dry_run]).run
-      puts "Plan saved to #{File.join(HOME, 'cache', 'last_synchro.json')}" if @opts[:dry_run] && plan
+      puts "Plan saved to #{File.join(config.cache_dir, 'last_synchro.json')}" if @opts[:dry_run] && plan
+    end
+
+    def cmd_tui
+      require_relative "../lib/merlin/tui"
+      # The TUI owns the screen: no stderr logging, speaker host/port still apply.
+      TUI::App.new(backend: Backend.new(token_store: config.token_store), config: config,
+                   speaker_opts: { host: @opts[:host], port: @opts[:port] }).run
     end
 
     # --- catalog -------------------------------------------------------------
@@ -247,22 +254,11 @@ module Merlin
     end
 
     def backend
-      @backend ||= Backend.new(token_store: TokenStore.new(File.join(HOME, "tokens.json")), logger: logger)
+      @backend ||= Backend.new(token_store: config.token_store, logger: logger)
     end
 
-    def setting_id = @opts[:setting_id] || settings["setting_id"]
-
-    def settings
-      @settings ||= File.exist?(settings_path) ? JSON.parse(File.read(settings_path)) : {}
-    end
-
-    def save_settings(values)
-      @settings = settings.merge(values)
-      FileUtils.mkdir_p(HOME)
-      File.write(settings_path, JSON.pretty_generate(@settings))
-    end
-
-    def settings_path = File.join(HOME, "config.json")
+    def config = @config ||= Config.new
+    def setting_id = @opts[:setting_id] || config.setting_id
 
     def logger
       @opts[:verbose] ? ->(msg) { warn "[merlin] #{msg}" } : nil

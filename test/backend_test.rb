@@ -94,7 +94,8 @@ class BackendTest < Minitest::Test
     assert_equal "Bearer tok1", api_req[:headers]["authorization"]
     assert_equal "set-9", api_req[:headers]["x-setting-id"]
     assert_equal "1.20.5", api_req[:headers]["x-merlin-app-version"]
-    assert_equal({ "status" => "PENDING", "type" => "TRANSFERT", "active" => false,
+    # Exact body the app sends (verified against the live API: anything else is a 400)
+    assert_equal({ "status" => "PENDING", "type" => "TRANSFERT", "start" => "", "end" => "", "active" => true,
                    "device_content_added" => 0, "device_agent" => Merlin::Backend::USER_AGENT },
                  JSON.parse(api_req[:body]))
     assert_equal 0o600, File.stat(File.join(@dir, "t.json")).mode & 0o777
@@ -108,7 +109,9 @@ class BackendTest < Minitest::Test
     assert_equal "PUT", put[:verb]
     assert_equal "/api/v1/synchros/s1", put[:path]
     assert_equal "Bearer tok2", put[:headers]["authorization"]
-    refute JSON.parse(put[:body]).key?("logs"), "nil fields are omitted"
+    body = JSON.parse(put[:body])
+    refute body.key?("logs"), "nil fields are omitted"
+    assert_equal ["", "", true], body.values_at("start", "end", "active")
   end
 
   def test_bad_password

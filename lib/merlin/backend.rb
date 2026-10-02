@@ -55,13 +55,17 @@ module Merlin
 
     # Starts a synchronisation. type: "TRANSFERT" (content), "PAIRING",
     # "FIRMWARE_UPDATE". Returns the plan: fileList, playlistText, time_slot...
+    # The app builds SynchroBody with Kotlin defaults (mask 14330 / 1920 / 896),
+    # which force start = end = "" and active = true; the API answers a bare
+    # 400 Bad Request without them.
+    SYNCHRO_DEFAULTS = { start: "", end: "", active: true, device_content_added: 0 }.freeze
+
     def create_synchro(type: "TRANSFERT")
-      post("synchros", { status: "PENDING", type: type, active: false,
-                         device_content_added: 0, device_agent: USER_AGENT })
+      post("synchros", { status: "PENDING", type: type, **SYNCHRO_DEFAULTS, device_agent: USER_AGENT })
     end
 
     def report_synchro(id, body)
-      put("synchros/#{id}", { active: false, device_agent: USER_AGENT }.merge(body).compact)
+      put("synchros/#{id}", { **SYNCHRO_DEFAULTS, device_agent: USER_AGENT }.merge(body).compact)
     end
 
     # File URLs in a synchro plan are fetched without auth, like the app does.

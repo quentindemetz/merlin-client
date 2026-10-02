@@ -8,6 +8,24 @@ tab, plus a few low-level speaker commands.
 ## Usage
 
 ```sh
+bundle install                        # ratatui_ruby (native gem, compiles on first install)
+bin/merlin                            # full-screen terminal UI (same as `bin/merlin tui`)
+```
+
+### Terminal UI
+
+* **Log in / Log out.** After login, a single speaker is selected automatically. With several, you get a picker.
+* **Speaker.** Pick which speaker the next actions apply to.
+* **On my speaker.** The speaker's content tree. `space` marks items and `d` queues the marked ones (or the current one) for removal. `c` jumps to the catalog.
+* **Browse / Search the catalog.** `enter` opens categories, collections and contents. `a` adds the marked episodes, or the collection under the cursor. Inside a collection, `A` adds every episode.
+* **Basket.** Pending adds and removals. `x` cancels the marked ones, `s` starts a sync.
+* **Sync now.** Runs the full transfer in the background with a live log. When it's time, a banner shows the speaker's Wi-Fi name and password; join it and press `enter`. You can switch on automatic Wi-Fi switching (macOS `networksetup`) before starting. `ctrl-c` aborts, and the abort is reported to Merlin.
+
+Keys everywhere: `↑↓`/`j k`, `PgUp`/`PgDn`, `enter`, `esc` back, and `q` quits from the menu.
+
+### Command line
+
+```sh
 bin/merlin login you@example.com      # Hello Merlin account (password prompted)
 bin/merlin speakers                   # list speakers; `bin/merlin use ID` to pick one
 bin/merlin sync                       # full transfer

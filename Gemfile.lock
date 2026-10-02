@@ -1,0 +1,52 @@
+GEM
+  remote: https://rubygems.org/
+  specs:
+    drb (2.2.3)
+    minitest (6.0.6)
+      drb (~> 2.0)
+      prism (~> 1.5)
+    minitest-mock (5.27.0)
+    prism (1.9.0)
+    rake (13.4.2)
+    rake-compiler-dock (1.12.0)
+    ratatui_ruby (1.5.0)
+      rb_sys (~> 0.9)
+      rexml (~> 3.4)
+    ratatui_ruby (1.5.0-arm64-darwin-24)
+      rb_sys (~> 0.9)
+      rexml (~> 3.4)
+    ratatui_ruby (1.5.0-x86_64-linux)
+      rb_sys (~> 0.9)
+      rexml (~> 3.4)
+    rb_sys (0.9.130)
+      rake-compiler-dock (= 1.12.0)
+    rexml (3.4.4)
+
+PLATFORMS
+  arm64-darwin-24
+  arm64-darwin-25
+  ruby
+  x86_64-linux
+
+DEPENDENCIES
+  minitest
+  minitest-mock
+  rake
+  ratatui_ruby (~> 1.5)
+
+CHECKSUMS
+  bundler (4.0.17) sha256=214e21431b5665dd2f99df8a5511c6b151d7a72e8015c8b38f8b775b61cbb6c1
+  drb (2.2.3) sha256=0b00d6fdb50995fe4a45dea13663493c841112e4068656854646f418fda13373
+  minitest (6.0.6) sha256=153ea36d1d987a62942382b61075745042a2b3123b1cd48f4c3675af9cc7d6f1
+  minitest-mock (5.27.0) sha256=7040ed7185417a966920987eaa6eaf1be4ea1fc5b25bb03ff4703f98564a55b0
+  prism (1.9.0) sha256=7b530c6a9f92c24300014919c9dcbc055bf4cdf51ec30aed099b06cd6674ef85
+  rake (13.4.2) sha256=cb825b2bd5f1f8e91ca37bddb4b9aaf345551b4731da62949be002fa89283701
+  rake-compiler-dock (1.12.0) sha256=f13205c2738f3d2053afcd03491a9e4541b22a59a0bfc53fc8bc883bd8188023
+  ratatui_ruby (1.5.0) sha256=85b164c432968d883557cd19333fb318953671052af990df71cd594cd8e59ece
+  ratatui_ruby (1.5.0-arm64-darwin-24) sha256=35a8c4aa01ff3fe177aaba80ba620c9185ee02ef0adc53960516d8be2523aed2
+  ratatui_ruby (1.5.0-x86_64-linux) sha256=8a0f48d1eaf5e686aa9d0de20622bbf5b8e1901860de1676ee1e6cc93aafb10b
+  rb_sys (0.9.130) sha256=7d486d99c1da02635515deaf9860fc5aea90bb4ab2589b2deec7fdc7d3548615
+  rexml (3.4.4) sha256=19e0a2c3425dfbf2d4fc1189747bdb2f849b6c5e74180401b15734bc97b5d142
+
+BUNDLED WITH
+  4.0.17

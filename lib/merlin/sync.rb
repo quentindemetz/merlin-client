@@ -75,7 +75,9 @@ module Merlin
       dir = File.join(@cache_dir, "sync_files")
       files = plan.fetch("fileList", []).map do |f|
         path = File.join(dir, File.basename(f.fetch("filename")))
-        if File.size?(path).nil? || (f["filesize"] && File.size(path) != f["filesize"])
+        # Like the app: reuse any non-empty cached file. Don't compare with
+        # "filesize" — the API reports a placeholder (20000) for images.
+        if File.size?(path).nil?
           say "  downloading #{f['type']} #{f['filename']} (#{f['title']})"
           @backend.download(f.fetch("url"), path)
         end
