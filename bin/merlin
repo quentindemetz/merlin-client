@@ -1,0 +1,216 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+require "optparse"
+require "io/console"
+require "json"
+require_relative "../lib/merlin"
+
+module Merlin
+  class CLI
+    HOME = ENV.fetch("MERLIN_HOME", File.join(Dir.home, ".config", "merlin"))
+
+    USAGE = <<~TXT
+      Usage: merlin [options] <command> [args]
+
+      Account (Hello Merlin cloud):
+        login [EMAIL]              Log in (password prompted, or $MERLIN_PASSWORD)
+        logout                     Forget stored tokens
+        speakers                   List speakers on the account
+        use SETTING_ID             Select the speaker used by `sync`
+        sync                       Full transfer: fetch plan + files, push to speaker, report
+
+      Speaker (laptop must be on the speaker's MERLIN Wi-Fi):
+        info                       Firmware, battery, storage, clock, MAC
+        upload FILE [NAME]         Upload a file (skipped if identical one exists)
+        exists NAME                Check whether a file exists (and its SHA-256)
+        get NAME [OUT]             Download a file from the speaker
+        apply-playlist NAME        Make the speaker load an uploaded playlist JSON
+        set-time                   Set speaker clock to this laptop's local time
+        set-hours WEEK WEEKEND     Allowed hours, e.g. 07:30-19:00 off
+        listening [OUT]            Fetch listening statistics (get_listening.cmd)
+
+      Options:
+    TXT
+
+    def initialize(argv)
+      @argv = argv
+      @opts = { host: Speaker::DEFAULT_HOST, port: Speaker::DEFAULT_PORT }
+    end
+
+    def run
+      parser.parse!(@argv)
+      cmd = @argv.shift or abort(parser.help)
+      method = "cmd_#{cmd.tr('-', '_')}"
+      abort("Unknown command: #{cmd}\n\n#{parser.help}") unless respond_to?(method, true)
+      send(method, *@argv)
+    rescue Error, ArgumentError => e
+      warn "Error: #{e.message}"
+      exit 1
+    rescue Interrupt
+      warn "\nInterrupted."
+      exit 130
+    end
+
+    private
+
+    def parser
+      @parser ||= OptionParser.new do |o|
+        o.banner = USAGE
+        o.on("--host HOST", "Speaker address (default #{Speaker::DEFAULT_HOST})") { |v| @opts[:host] = v }
+        o.on("--port PORT", Integer, "Speaker port (default #{Speaker::DEFAULT_PORT})") { |v| @opts[:port] = v }
+        o.on("--setting-id ID", "Speaker (settings id) to sync, overrides `use`") { |v| @opts[:setting_id] = v }
+        o.on("--auto-wifi", "sync: switch Wi-Fi automatically with networksetup") { @opts[:auto_wifi] = true }
+        o.on("--wifi-interface IF", "Wi-Fi interface for --auto-wifi (default: detected)") { |v| @opts[:iface] = v }
+        o.on("--home-ssid SSID", "Network to rejoin after --auto-wifi") { |v| @opts[:home_ssid] = v }
+        o.on("--dry-run", "sync: create synchro and download files only") { @opts[:dry_run] = true }
+        o.on("-v", "--verbose", "Log protocol/HTTP traffic") { @opts[:verbose] = true }
+      end
+    end
+
+    # --- account -------------------------------------------------------------
+
+    def cmd_login(email = nil)
+      email ||= prompt("Email: ")
+      password = ENV["MERLIN_PASSWORD"] || prompt("Password: ", secret: true)
+      backend.login(email, password)
+      puts "Logged in."
+      list = backend.speakers
+      if list.size == 1 && !settings["setting_id"]
+        save_settings("setting_id" => list.first["id"])
+        puts "Using speaker #{list.first['speaker_name'].inspect}."
+      elsif list.size > 1
+        puts "Several speakers on this account; pick one with `merlin use ID` (see `merlin speakers`)."
+      end
+    end
+
+    def cmd_logout
+      backend.logout
+      puts "Logged out."
+    end
+
+    def cmd_speakers
+      current = setting_id
+      backend.speakers.each do |s|
+        mark = s["id"].to_s == current.to_s ? "*" : " "
+        puts "#{mark} #{s['id']}  #{s['speaker_name'] || '(unnamed)'}  ssid=#{s['ssid']}  " \
+             "to_sync=#{s['toSyncCount']}  registered=#{s['speakerRegistered']}"
+      end
+    end
+
+    def cmd_use(id)
+      save_settings("setting_id" => id)
+      puts "Selected speaker #{id}."
+    end
+
+    def cmd_sync
+      raise Error, "not logged in (run `merlin login`)" unless backend.logged_in?
+
+      backend.setting_id = setting_id
+      wifi = Wifi.new(auto: @opts[:auto_wifi], interface: @opts[:iface], home_ssid: @opts[:home_ssid])
+      plan = Sync.new(backend: backend, cache_dir: File.join(HOME, "cache"), wifi: wifi,
+                      speaker_opts: speaker_opts, dry_run: @opts[:dry_run]).run
+      puts "Plan saved to #{File.join(HOME, 'cache', 'last_synchro.json')}" if @opts[:dry_run] && plan
+    end
+
+    # --- speaker -------------------------------------------------------------
+
+    def cmd_info
+      with_speaker do |s|
+        i = s.info
+        puts "Firmware:   #{i[:firmware_version]}"
+        puts "MAC:        #{i[:mac_address]}"
+        puts "Battery:    #{i[:battery][:level]}%#{' (charging)' if i[:battery][:charging]}"
+        puts "Storage:    #{i[:available_space]} free / #{i[:total_size]} total"
+        puts "Clock:      #{i[:date]&.strftime('%Y-%m-%d %H:%M:%S') || 'not set'}"
+      end
+    end
+
+    def cmd_upload(path, name = File.basename(path))
+      data = File.binread(path)
+      with_speaker do |s|
+        result = s.sync_file(name, data) { |sent, total| print "\r#{name}: #{sent * 100 / [total, 1].max}%" }
+        puts "\r#{name}: #{result == :uploaded ? 'uploaded' : 'already present'}"
+      end
+    end
+
+    def cmd_exists(name)
+      with_speaker do |s|
+        r = s.search_file(name, verify: true)
+        puts r[:found] ? "found  sha256=#{r[:sha256]}" : "not found"
+      end
+    end
+
+    def cmd_get(name, out = File.basename(name))
+      with_speaker { |s| File.binwrite(out, s.get_file(name)) }
+      puts "Saved #{out}"
+    end
+
+    def cmd_apply_playlist(name)
+      with_speaker { |s| s.update_playlist(name) }
+      puts "Playlist applied."
+    end
+
+    def cmd_set_time
+      with_speaker { |s| s.set_date(Time.now) }
+      puts "Clock set to #{Time.now.strftime('%Y-%m-%d %H:%M:%S')}."
+    end
+
+    def cmd_set_hours(week, weekend)
+      with_speaker { |s| s.set_enabling_hours(parse_window(week), parse_window(weekend)) }
+      puts "Enabling hours set."
+    end
+
+    def cmd_listening(out = "listening.bin")
+      with_speaker { |s| File.binwrite(out, s.get_file("get_listening.cmd")) }
+      puts "Saved #{out} (#{File.size(out) / 43} record(s))"
+    end
+
+    # --- helpers -------------------------------------------------------------
+
+    def parse_window(str)
+      return [[10, 0], [10, 0]] if str == "off"
+
+      m = str.match(/\A(\d{1,2}):(\d{2})-(\d{1,2}):(\d{2})\z/) or raise ArgumentError, "bad window #{str.inspect} (HH:MM-HH:MM or off)"
+      [[m[1].to_i, m[2].to_i], [m[3].to_i, m[4].to_i]]
+    end
+
+    def with_speaker(&)
+      Speaker.open(**speaker_opts, &)
+    end
+
+    def speaker_opts
+      { host: @opts[:host], port: @opts[:port], logger: logger }
+    end
+
+    def backend
+      @backend ||= Backend.new(token_store: TokenStore.new(File.join(HOME, "tokens.json")), logger: logger)
+    end
+
+    def setting_id = @opts[:setting_id] || settings["setting_id"]
+
+    def settings
+      @settings ||= File.exist?(settings_path) ? JSON.parse(File.read(settings_path)) : {}
+    end
+
+    def save_settings(values)
+      @settings = settings.merge(values)
+      FileUtils.mkdir_p(HOME)
+      File.write(settings_path, JSON.pretty_generate(@settings))
+    end
+
+    def settings_path = File.join(HOME, "config.json")
+
+    def logger
+      @opts[:verbose] ? ->(msg) { warn "[merlin] #{msg}" } : nil
+    end
+
+    def prompt(label, secret: false)
+      print label
+      value = secret ? $stdin.noecho(&:gets).tap { puts } : $stdin.gets
+      value.to_s.chomp
+    end
+  end
+end
+
+Merlin::CLI.new(ARGV).run
