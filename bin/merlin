@@ -20,6 +20,20 @@ module Merlin
         use SETTING_ID             Select the speaker used by `sync`
         sync                       Full transfer: fetch plan + files, push to speaker, report
 
+      Catalog (Hello Merlin cloud):
+        browse [PAGE_ID]           Store home page (or another page) with its sliders/grids
+        taxon ID                   Collections/contents under a taxon (category)
+        collection ID              Collection details and episode list
+        content ID                 One audio content
+        search QUERY...            Search contents and collections
+        packs                      Offered packs
+        library                    What is / will be on the selected speaker
+        basket                     Pending selection for the next sync
+        add CONTENT_ID...          Queue contents for the speaker (next `sync`)
+        add-collection ID          Queue a whole collection
+        remove CONTENT_ID...       Queue contents for removal from the speaker
+        cancel CONTENT_ID...       Drop pending add/remove entries from the basket
+
       Speaker (laptop must be on the speaker's MERLIN Wi-Fi):
         info                       Firmware, battery, storage, clock, MAC
         upload FILE [NAME]         Upload a file (skipped if identical one exists)
@@ -64,6 +78,7 @@ module Merlin
         o.on("--wifi-interface IF", "Wi-Fi interface for --auto-wifi (default: detected)") { |v| @opts[:iface] = v }
         o.on("--home-ssid SSID", "Network to rejoin after --auto-wifi") { |v| @opts[:home_ssid] = v }
         o.on("--dry-run", "sync: create synchro and download files only") { @opts[:dry_run] = true }
+        o.on("--json", "Catalog commands: print the raw API JSON") { @opts[:json] = true }
         o.on("-v", "--verbose", "Log protocol/HTTP traffic") { @opts[:verbose] = true }
       end
     end
@@ -111,6 +126,54 @@ module Merlin
       plan = Sync.new(backend: backend, cache_dir: File.join(HOME, "cache"), wifi: wifi,
                       speaker_opts: speaker_opts, dry_run: @opts[:dry_run]).run
       puts "Plan saved to #{File.join(HOME, 'cache', 'last_synchro.json')}" if @opts[:dry_run] && plan
+    end
+
+    # --- catalog -------------------------------------------------------------
+
+    def cmd_browse(id = nil)
+      id ||= api.home_page_id or raise Error, "account config has no home_page_id"
+      show(api.page(id)) { |r| CatalogView.page(r) }
+    end
+
+    def cmd_taxon(id) = show(api.taxonomy(id)) { |r| CatalogView.taxonomy(r) }
+    def cmd_collection(id) = show(api.collection(id)) { |r| CatalogView.collection(r) }
+    def cmd_content(id) = show(api.content(id)) { |r| CatalogView.content(r) }
+    def cmd_packs = show(api.offered_packs) { |r| CatalogView.packs(r) }
+    def cmd_library = show(api.speaker_library) { |r| CatalogView.library(r) }
+    def cmd_basket = show(api.selections) { |r| CatalogView.selections(r) }
+
+    def cmd_search(*words)
+      raise ArgumentError, "search needs a query" if words.empty?
+
+      show(api.search(words.join(" "))) { |r| CatalogView.search(r) }
+    end
+
+    def cmd_add(*ids) = basket_change(api.select_contents(need(ids), add: true))
+    def cmd_remove(*ids) = basket_change(api.select_contents(need(ids), add: false))
+    def cmd_cancel(*ids) = basket_change(api.cancel_selections(need(ids)))
+    def cmd_add_collection(id) = basket_change(api.select_collection(id))
+
+    def basket_change(entries)
+      show(entries) { |r| CatalogView.selections(r) }
+      puts "\nRun `merlin sync` to apply." unless @opts[:json]
+    end
+
+    def need(ids)
+      raise ArgumentError, "give at least one content id" if ids.empty?
+
+      ids
+    end
+
+    def show(result)
+      puts @opts[:json] ? JSON.pretty_generate(result) : yield(result)
+    end
+
+    # Logged-in backend scoped to the selected speaker.
+    def api
+      raise Error, "not logged in (run `merlin login`)" unless backend.logged_in?
+
+      backend.setting_id = setting_id
+      backend
     end
 
     # --- speaker -------------------------------------------------------------

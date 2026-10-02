@@ -60,6 +60,12 @@ class BackendTest < Minitest::Test
         [401, "{}"]
       elsif req[:path] == "/api/v1/synchros" && req[:verb] == "POST"
         [200, JSON.generate(id: "s1", type: "TRANSFERT", fileList: [], playlistText: "[]")]
+      elsif req[:path] == "/api/v1/configs/multi"
+        [200, JSON.generate(home_page_id: "home-1", settings: [{ id: "set-9", speaker_name: "Merlin" }])]
+      elsif req[:path].start_with?("/api/v1/selections")
+        [200, JSON.generate([{ add: true, selection: true, content: { id: "c1", title: "Le loup" } }])]
+      elsif req[:path].start_with?("/api/v1/")
+        [200, JSON.generate(echo: req[:path])]
       else
         [200, ""]
       end
@@ -111,7 +117,50 @@ class BackendTest < Minitest::Test
     refute @backend.logged_in?
   end
 
+  def test_catalog_endpoints
+    @backend.login("a", "pw")
+    assert_equal "home-1", @backend.home_page_id
+    {
+      -> { @backend.page("p 1") } => "/api/v1/pages/p%201/full",
+      -> { @backend.taxonomy("t1") } => "/api/v1/taxonomies/t1/full",
+      -> { @backend.collection("c1") } => "/api/v1/collections/c1/purchase-info",
+      -> { @backend.content("k1") } => "/api/v1/contents/k1/full",
+      -> { @backend.search("petit ours/brun") } => "/api/v1/contents/search/petit%20ours%2Fbrun",
+      -> { @backend.offered_packs } => "/api/v1/packs/list/offered",
+      -> { @backend.pack_preview("pk") } => "/api/v1/packs/preview/pk",
+      -> { @backend.speaker_library } => "/api/v1/catalogs"
+    }.each do |call, path|
+      assert_equal({ "echo" => path }, call.call)
+      assert_equal "set-9", @server.requests.last[:headers]["x-setting-id"]
+    end
+  end
+
+  def test_selection_endpoints
+    @backend.login("a", "pw")
+    entries = @backend.select_contents(%w[c1 c2])
+    assert_equal "c1", entries.first.dig("content", "id")
+    assert_selection_request "POST", "/api/v1/selections", { "add" => true, "contents" => %w[c1 c2] }
+
+    @backend.select_contents("c3", add: false)
+    assert_selection_request "POST", "/api/v1/selections", { "add" => false, "contents" => ["c3"] }
+
+    @backend.select_collection("col-7")
+    assert_selection_request "POST", "/api/v1/selections/collection", { "add" => true, "collectionId" => "col-7" }
+
+    @backend.cancel_selections(["c1"])
+    assert_selection_request "DELETE", "/api/v1/selections", { "contents" => ["c1"] }
+
+    @backend.selections
+    assert_equal %w[GET /api/v1/selections], @server.requests.last.values_at(:verb, :path)
+  end
+
   private
+
+  def assert_selection_request(verb, path, body)
+    req = @server.requests.last
+    assert_equal [verb, path], [req[:verb], req[:path]]
+    assert_equal body, JSON.parse(req[:body])
+  end
 
   def stub_const(name, value)
     (@saved_consts ||= {})[name] = Merlin::Backend.const_get(name)

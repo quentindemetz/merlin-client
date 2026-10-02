@@ -73,6 +73,33 @@ module Merlin
       dest
     end
 
+    # --- Catalog -------------------------------------------------------------
+    #
+    # The store is a tree of pages: a page has "modules" (keyed by "format":
+    # selection_slider, taxon_slider, taxon_grid_large/small,
+    # taxon_slider_potatoes, website_purchase). Taxa either open another page
+    # ("subpageid") or a taxonomy listing collections/contents. Durations are in
+    # seconds.
+
+    def home_page_id = config["home_page_id"]
+    def page(id) = get("pages/#{seg(id)}/full")
+    def taxonomy(id) = get("taxonomies/#{seg(id)}/full")
+    def collection(id) = get("collections/#{seg(id)}/purchase-info") # includes the episode list
+    def content(id) = get("contents/#{seg(id)}/full")
+    def search(query) = get("contents/search/#{seg(query)}") # [{collection:}|{content:}]
+    def offered_packs = get("packs/list/offered")
+    def pack_preview(id) = get("packs/preview/#{seg(id)}")
+
+    # What is (or will be) on the selected speaker: a tree of folders/contents
+    # with add / selection / isInLastSync flags.
+    def speaker_library = get("catalogs")
+
+    # The "basket" of pending changes picked up by the next synchro.
+    def selections = get("selections")
+    def select_contents(ids, add: true) = post("selections", { add: add, contents: Array(ids) })
+    def select_collection(id) = post("selections/collection", { add: true, collectionId: id })
+    def cancel_selections(ids) = api(:delete, "selections", { contents: Array(ids) })
+
     def get(path) = api(:get, path)
     def post(path, body) = api(:post, path, body)
     def put(path, body) = api(:put, path, body)
@@ -82,7 +109,8 @@ module Merlin
     def api(verb, path, body = nil, retried: false)
       refresh! if @tokens && Time.now.to_i >= @tokens["expires_at"].to_i
       uri = URI.join(API_BASE, path)
-      req = { get: Net::HTTP::Get, post: Net::HTTP::Post, put: Net::HTTP::Put }.fetch(verb).new(uri)
+      req = { get: Net::HTTP::Get, post: Net::HTTP::Post, put: Net::HTTP::Put,
+              delete: Net::HTTP::Delete }.fetch(verb).new(uri)
       app_headers(req)
       req["Authorization"] = "Bearer #{@tokens['access_token']}" if @tokens
       req["X-Setting-Id"] = setting_id.to_s if setting_id
@@ -159,6 +187,8 @@ module Merlin
         end
       end
     end
+
+    def seg(value) = URI.encode_uri_component(value.to_s)
 
     def app_headers(req)
       req["User-Agent"] = USER_AGENT

@@ -21,6 +21,24 @@ its `MERLIN…` Wi-Fi network. After the transfer you switch back and it sends t
 report. With `--auto-wifi` it switches networks for you using `networksetup`. Add
 `--home-ssid` if macOS won't tell it the name of your current network.
 
+Browsing the catalog and choosing what goes on the speaker. Every listed line
+starts with a kind and an id, which you pass to the next command. Add `--json`
+to get the raw API response.
+
+```sh
+bin/merlin browse                     # store home page: sliders of taxa, collections, contents
+bin/merlin browse PAGE_ID             # a sub-page ("[taxon] … → page X")
+bin/merlin taxon ID                   # a category ("[taxon] … → taxon X")
+bin/merlin collection ID              # details and episode list
+bin/merlin content ID
+bin/merlin search petit ours brun
+bin/merlin library                    # what is / will be on the speaker
+bin/merlin add CONTENT_ID...          # queue for the next `sync` (also: add-collection ID)
+bin/merlin remove CONTENT_ID...       # queue removal from the speaker
+bin/merlin basket                     # pending changes; `cancel ID...` drops entries
+bin/merlin sync
+```
+
 Speaker-only commands (you must already be on the speaker's Wi-Fi):
 
 ```sh
@@ -77,4 +95,20 @@ stats, and `get_listening.cmd` can be downloaded through cmd 13.
 * The API lives at `https://api.hello-merlin.com/api/v1/`. Requests carry `Authorization: Bearer …`, `X-Setting-Id` (selects the speaker) and `X-Merlin-*` app headers.
 * `POST synchros` with `{status: PENDING, type: TRANSFERT, …}` returns the plan: `id`, `fileList[{type, url, filename, title, filesize}]`, `playlistText`, `time_slot`, `ssid`/`password`, `pendingSsid`/`pendingPassword`.
 * File URLs are downloaded without auth.
+* Catalog endpoints (all GET):
+  * `configs/multi` (gives `home_page_id`)
+  * `pages/{id}/full`, made of `modules[]` keyed by `format`: `selection_slider`, `taxon_slider`, `taxon_grid_large`/`_small`, `taxon_slider_potatoes`, `website_purchase`
+  * `taxonomies/{id}/full`
+  * `collections/{id}/purchase-info` (includes the episodes)
+  * `contents/{id}/full`
+  * `contents/search/{q}`
+  * `packs/list/offered`, `packs/preview/{id}`
+  * `catalogs` (the speaker's content tree)
+
+  Durations are in seconds.
+* The basket uses:
+  * `GET selections`
+  * `POST selections {add, contents[]}`
+  * `POST selections/collection {add, collectionId}`
+  * `DELETE selections {contents[]}`
 * `PUT synchros/{id}` sends the report: `status` SUCCESS/FAIL, `status_code` such as `100_SUCCEED`, `firmware_version`, `sd_size`, `available_size`, `mac_address`, `logs`.
