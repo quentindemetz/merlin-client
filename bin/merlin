@@ -19,6 +19,7 @@ module Merlin
         speakers                   List speakers on the account
         use SETTING_ID             Select the speaker used by `sync`
         sync                       Full transfer: fetch plan + files, push to speaker, report
+        unisolate                  Remove the speaker traffic filter (if a sync died)
 
       Catalog (Hello Merlin cloud):
         browse [PAGE_ID]           Store home page (or another page) with its sliders/grids
@@ -61,6 +62,7 @@ module Merlin
     rescue Error, ArgumentError => e
       warn "Error: #{e.message}"
       warn "Details of every API call: #{File.join(config.log_dir, "http-#{Date.today.iso8601}.jsonl")}" if e.is_a?(BackendError)
+      warn "Speaker protocol trace: #{File.join(config.log_dir, "speaker-#{Date.today.iso8601}.log")}" if e.is_a?(SpeakerError) || e.is_a?(Sync::Failure)
       exit 1
     rescue Interrupt
       warn "\nInterrupted."
@@ -79,6 +81,7 @@ module Merlin
         o.on("--wifi-interface IF", "Wi-Fi interface for --auto-wifi (default: detected)") { |v| @opts[:iface] = v }
         o.on("--home-ssid SSID", "Network to rejoin after --auto-wifi") { |v| @opts[:home_ssid] = v }
         o.on("--dry-run", "sync: create synchro and download files only") { @opts[:dry_run] = true }
+        o.on("--no-isolate", "sync: don't filter this Mac's other traffic (the speaker may crash)") { @opts[:no_isolate] = true }
         o.on("--json", "Catalog commands: print the raw API JSON") { @opts[:json] = true }
         o.on("-v", "--verbose", "Log protocol/HTTP traffic") { @opts[:verbose] = true }
       end
@@ -124,16 +127,32 @@ module Merlin
 
       backend.setting_id = setting_id
       wifi = Wifi.new(auto: @opts[:auto_wifi], interface: @opts[:iface], home_ssid: @opts[:home_ssid])
-      plan = Sync.new(backend: backend, cache_dir: config.cache_dir, wifi: wifi,
+      isolation = isolation_for_sync
+      plan = Sync.new(backend: backend, cache_dir: config.cache_dir, wifi: wifi, isolation: isolation,
                       speaker_opts: speaker_opts, dry_run: @opts[:dry_run]).run
       puts "Plan saved to #{File.join(config.cache_dir, 'last_synchro.json')}" if @opts[:dry_run] && plan
+    end
+
+    # Unless --no-isolate: ask for the admin password now (before downloads)
+    # so the traffic filter can be applied when joining the speaker.
+    def isolation_for_sync
+      return nil if @opts[:no_isolate] || @opts[:dry_run]
+
+      puts "The speaker crashes if this Mac's other traffic reaches it; a temporary filter needs admin rights."
+      config.isolation(speaker_ip: @opts[:host], port: @opts[:port]).tap(&:authorize!)
+    end
+
+    def cmd_unisolate
+      isolation = config.isolation(speaker_ip: @opts[:host], port: @opts[:port])
+      isolation.authorize!
+      isolation.leftover? ? isolation.release_leftover : isolation.disable!
     end
 
     def cmd_tui
       require_relative "../lib/merlin/tui"
       # The TUI owns the screen: no stderr logging, speaker host/port still apply.
       TUI::App.new(backend: Backend.new(token_store: config.token_store, http_log: config.http_log), config: config,
-                   speaker_opts: { host: @opts[:host], port: @opts[:port] }).run
+                   speaker_opts: { host: @opts[:host], port: @opts[:port], logger: config.speaker_log }).run
     end
 
     # --- catalog -------------------------------------------------------------
@@ -251,7 +270,7 @@ module Merlin
     end
 
     def speaker_opts
-      { host: @opts[:host], port: @opts[:port], logger: logger }
+      { host: @opts[:host], port: @opts[:port], logger: config.speaker_log(echo: logger) }
     end
 
     def backend

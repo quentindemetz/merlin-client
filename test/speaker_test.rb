@@ -60,9 +60,34 @@ class SpeakerTest < Minitest::Test
     assert_equal :uploaded, @speaker.upload("a.mp3", data) { |sent, _| progress << sent }
     assert_equal data, @fake.files["a.mp3"]
     assert_equal [102_400, 204_800, 307_200, 350_000], progress
-    assert_equal({ found: true, sha256: Digest::SHA256.hexdigest(data) }, @speaker.search_file("a.mp3"))
+    assert_equal({ found: true, sha256: Digest::SHA256.hexdigest(data) }, @speaker.search_file("a.mp3").slice(:found, :sha256))
     assert_equal :already_present, @speaker.sync_file("a.mp3", data)
     assert_equal :already_present, @speaker.upload("a.mp3", data)
+  end
+
+  # Exact reply captured from Verte (firmware 2.1.16): the size sits between
+  # the name and the hash. Misreading it made every file look different.
+  def test_search_reply_from_real_firmware
+    raw = ["0028", "bdfbb5fc-09b3-4f82-9774-959cbff41ac0.jpg".unpack1("H*"), "e8340000",
+           "75199ef72f3e8a67e18bcaa3fc4b1b47dc593fab10d8d1fb91ed9521045d2868"].join
+    @fake.define_singleton_method(:dispatch) do |sock, frame|
+      frame.cmd == Merlin::Protocol::Cmd::SEARCH_FILE ? sock.write(Merlin::Protocol.encode(frame.cmd, [raw].pack("H*"))) : super(sock, frame)
+      nil
+    end
+    r = @speaker.search_file("bdfbb5fc-09b3-4f82-9774-959cbff41ac0.jpg")
+    assert_equal [true, 13_544, "75199ef72f3e8a67e18bcaa3fc4b1b47dc593fab10d8d1fb91ed9521045d2868"],
+                 r.values_at(:found, :size, :sha256)
+  end
+
+  def test_identical_file_is_skipped_with_both_reply_layouts
+    data = "x" * 5000
+    [false, true].each do |legacy|
+      @fake.legacy_search_layout = legacy
+      @fake.files["f#{legacy}.jpg"] = data.dup
+      assert_equal :already_present, @speaker.sync_file("f#{legacy}.jpg", data), "legacy layout=#{legacy}"
+    end
+    @fake.files["g.jpg"] = "y" * 5000 # same size, different content
+    assert_equal :uploaded, @speaker.sync_file("g.jpg", data)
   end
 
   def test_search_missing

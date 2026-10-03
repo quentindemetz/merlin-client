@@ -16,11 +16,14 @@ module Merlin
       attr_reader :config, :tui, :speaker_opts
       attr_accessor :basket_count
 
-      def initialize(backend:, config:, speaker_opts: {}, sync_factory: nil)
+      # isolation_factory: ->(out:) { Isolation or nil } — the traffic filter used
+      # during transfers (injectable so tests never touch the real firewall).
+      def initialize(backend:, config:, speaker_opts: {}, sync_factory: nil, isolation_factory: nil)
         @backend = backend
         @config = config
         @speaker_opts = speaker_opts
         @sync_factory = sync_factory || method(:default_sync)
+        @isolation_factory = isolation_factory || method(:default_isolation)
         @stack = []
         @status = nil
       end
@@ -38,6 +41,8 @@ module Merlin
             handle(event) unless event.none?
           end
         end
+      ensure
+        active_sync&.shutdown # a sync still waiting to report saves it for next time
       end
 
       # --- navigation ----------------------------------------------------------
@@ -93,7 +98,20 @@ module Merlin
         @basket_count = nil
       end
 
-      def new_sync(out:, wifi:) = @sync_factory.call(out: out, wifi: wifi)
+      def new_sync(**) = @sync_factory.call(**)
+      def new_isolation(out:) = @isolation_factory.call(out: out)
+
+      # Hands the real terminal back (e.g. for sudo's password prompt), then
+      # resumes the full-screen UI.
+      def suspend
+        RatatuiRuby.restore_terminal
+        yield
+      ensure
+        RatatuiRuby.init_terminal
+      end
+
+      # The most recent sync, which may still be reporting in the background.
+      attr_accessor :active_sync
 
       # --- status / loading ------------------------------------------------------
 
@@ -189,8 +207,14 @@ module Merlin
         tui.line(spans: spans)
       end
 
-      def default_sync(out:, wifi:)
-        Sync.new(backend: backend, cache_dir: config.cache_dir, wifi: wifi, speaker_opts: speaker_opts, out: out)
+      def default_sync(out:, wifi:, on_transfer_end: nil, isolation: nil)
+        Sync.new(backend: backend, cache_dir: config.cache_dir, wifi: wifi, speaker_opts: speaker_opts, out: out,
+                 on_transfer_end: on_transfer_end, isolation: isolation)
+      end
+
+      def default_isolation(out:)
+        config.isolation(out: out, speaker_ip: speaker_opts.fetch(:host, Speaker::DEFAULT_HOST),
+                         port: speaker_opts.fetch(:port, Speaker::DEFAULT_PORT))
       end
     end
   end

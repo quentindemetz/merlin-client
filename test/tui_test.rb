@@ -5,6 +5,7 @@ require "tmpdir"
 require "ratatui_ruby"
 require "ratatui_ruby/test_helper"
 require_relative "../lib/merlin/tui"
+require_relative "fake_speaker"
 
 class TUITest < Minitest::Test
   include RatatuiRuby::TestHelper
@@ -90,6 +91,34 @@ class TUITest < Minitest::Test
     end
 
     def search(q) = [{ "content" => { "id" => "k5", "title" => "Petit ours #{q}" } }]
+
+    # --- synchro endpoints (used with the real Merlin::Sync) ---
+    attr_reader :reports
+
+    def create_synchro(type:)
+      offline_guard!
+      { "id" => "syn-tui", "type" => type, "ssid" => "MERLIN_TUI", "password" => "pw",
+        "fileList" => [{ "type" => "image", "url" => "https://cdn/i.jpg", "filename" => "i.jpg", "title" => "Img" },
+                       { "type" => "audio", "url" => "https://cdn/a.mp3", "filename" => "a.mp3", "title" => "Le loup" }],
+        "playlistText" => '[{"uuid":"a","title":"Le loup"}]' }
+    end
+
+    def download(url, dest)
+      offline_guard!
+      FileUtils.mkdir_p(File.dirname(dest))
+      File.binwrite(dest, "data for #{url}" * 100)
+    end
+
+    def report_synchro(id, body)
+      offline_guard!
+      (@reports ||= []) << [id, body]
+    end
+
+    private
+
+    def offline_guard!
+      raise Merlin::OfflineError, "can't reach api.hello-merlin.com" unless reachable?
+    end
   end
 
   def setup
@@ -99,8 +128,55 @@ class TUITest < Minitest::Test
 
   def teardown = FileUtils.rm_rf(@dir)
 
-  def app(backend, **)
-    Merlin::TUI::App.new(backend: backend, config: @config, **)
+  # No real firewall in tests: isolation is off unless a test provides one.
+  def app(backend, isolation_factory: ->(out:) { nil }, **)
+    Merlin::TUI::App.new(backend: backend, config: @config, isolation_factory: isolation_factory, **)
+  end
+
+  class RecordingIsolation
+    attr_reader :calls
+
+    def initialize = @calls = []
+    def authorize! = @calls << :authorize
+    def enable! = @calls << :enable
+    def disable! = @calls << :disable
+    def active? = @calls.last == :enable
+  end
+
+  def test_sync_asks_for_admin_rights_once_and_filters_traffic
+    @config.setting_id = "s1"
+    speaker = FakeSpeaker.new
+    backend = FakeBackend.new
+    iso = RecordingIsolation.new
+    sync_screen = nil
+    stop = lambda do |a|
+      sync_screen = a.screen if a.screen.is_a?(Merlin::TUI::Screens::SyncScreen)
+      s = sync_screen&.session
+      inject_keys(:enter) if s&.wifi&.waiting && screen_text.include?("MERLIN_TUI") && !@joined && (@joined = true)
+      s&.finished? && !s.reporting?
+    end
+    with_test_terminal(100, 30, timeout: 15) do
+      inject_keys(:end, :up, :enter, :enter)
+      app(backend, isolation_factory: ->(out:) { iso }, speaker_opts: { host: "127.0.0.1", port: speaker.port })
+        .run(stop_when: stop)
+    end
+    assert_equal %i[authorize enable disable], iso.calls
+    assert_equal :done, sync_screen.session.state
+  ensure
+    speaker&.stop
+  end
+
+  def test_traffic_filter_can_be_turned_off
+    @config.setting_id = "s1"
+    calls = []
+    factory = ->(out:) { calls << :created && nil }
+    with_test_terminal(100, 30) do
+      # Sync now -> 3rd row (filter toggle) -> off; screen shows the warning
+      inject_keys(:end, :up, :enter, :down, :down, :enter)
+      app(FakeBackend.new, isolation_factory: factory)
+        .run(stop_when: ->(a) { a.screen.is_a?(Merlin::TUI::Screens::SyncScreen) && screen_text.include?("off (speaker may crash)") })
+    end
+    assert_empty calls # nothing created until a transfer starts
   end
 
   def screen_text = buffer_content.join("\n")
@@ -185,9 +261,10 @@ class TUITest < Minitest::Test
   end
 
   class FakeSync
-    def initialize(out:, wifi:)
+    def initialize(out:, wifi:, on_transfer_end: nil)
       @out = out
       @wifi = wifi
+      @on_transfer_end = on_transfer_end
     end
 
     def run
@@ -196,6 +273,8 @@ class TUITest < Minitest::Test
       @out.print "\r  [audio 1/1] a.mp3 50%"
       @out.print "\r  [audio 1/1] a.mp3 uploaded\n"
       @out.puts "Transfer complete."
+      @on_transfer_end&.call(status: "SUCCESS")
+      @wifi.restore
     end
   end
 
@@ -221,7 +300,7 @@ class TUITest < Minitest::Test
     with_test_terminal(100, 30) do
       # Menu → Sync now (2nd to last) → Start transfer
       inject_keys(:end, :up, :enter, :enter)
-      app(backend, sync_factory: ->(out:, wifi:) { FakeSync.new(out: out, wifi: wifi) }).run(stop_when: stop)
+      app(backend, sync_factory: ->(**kw) { FakeSync.new(**kw) }).run(stop_when: stop)
       app_text = screen_text
       assert_includes app_text, "a.mp3 uploaded"
       refute_includes app_text, "50%"
@@ -232,16 +311,18 @@ class TUITest < Minitest::Test
   # Goes offline while "on the speaker", then the user leaves the sync screen
   # before reconnecting — this used to crash the TUI (Socket::ResolutionError).
   class OfflineSync
-    def initialize(out:, wifi:, backend:)
+    def initialize(out:, wifi:, backend:, on_transfer_end: nil)
       @out = out
       @wifi = wifi
       @backend = backend
+      @on_transfer_end = on_transfer_end
     end
 
     def run
       @wifi.join_speaker("MERLIN_DKCRG8", "pw")
       @backend.online = false
       @out.puts "  [audio 1/1] a.mp3 uploaded"
+      @on_transfer_end&.call(status: "SUCCESS")
       @out.puts(@wifi.restore == :skip ? "Report saved for next sync." : "Report sent.")
     end
   end
@@ -258,20 +339,64 @@ class TUITest < Minitest::Test
         inject_keys(:enter) && pressed << :join
       elsif wifi&.reconnecting && !pressed.include?(:skip) && screen_text.include?("Back to your usual Wi-Fi")
         inject_keys(:enter) && pressed << :skip # don't wait for internet
-      elsif sync_screen&.session&.finished? && !pressed.include?(:esc)
+      elsif sync_screen&.session&.finished? && pressed.include?(:skip) && !pressed.include?(:esc)
         inject_keys(:esc) && pressed << :esc # back to the menu while still offline
       end
       a.screen.is_a?(Merlin::TUI::Screens::MainMenu) && pressed.include?(:esc)
     end
     with_test_terminal(100, 30) do
       inject_keys(:end, :up, :enter, :enter)
-      app(backend, sync_factory: ->(out:, wifi:) { OfflineSync.new(out: out, wifi: wifi, backend: backend) })
+      app(backend, sync_factory: ->(**kw) { OfflineSync.new(**kw, backend: backend) })
         .run(stop_when: stop)
       assert_includes screen_text, "can't reach api.hello-merlin.com"
       assert_includes screen_text, "Sync now"
     end
     assert_equal %i[join skip esc], pressed
+    sync_screen.session.join(2) # the report step runs on after the screen was left
     assert_includes sync_screen.session.log.lines, "Report saved for next sync."
+  end
+
+  # Real Merlin::Sync against the fake speaker: the "back to your usual Wi-Fi"
+  # banner must only ever be painted once the transfer result is on screen.
+  def test_reconnect_banner_only_after_transfer_finished
+    speaker = FakeSpeaker.new
+    @config.setting_id = "s1"
+    backend = FakeBackend.new
+    sync_screen = nil
+    banner_frames = 0
+    frames_after_report = 0
+    violations = []
+    stop = lambda do |a|
+      sync_screen = a.screen if a.screen.is_a?(Merlin::TUI::Screens::SyncScreen)
+      session = sync_screen&.session
+      text = screen_text
+      if text.include?("Back to your usual Wi-Fi")
+        banner_frames += 1
+        unless session.finished? && !text.include?("Transfer — running") && text.include?("✔ Transfer complete") &&
+               text.include?("Transfer — done · reporting to Merlin")
+          violations << text
+        end
+        backend.online = true if banner_frames == 3 # the user is back on their usual Wi-Fi
+      end
+      if session&.wifi&.waiting && text.include?("MERLIN_TUI") && backend.online != false
+        backend.online = false # the Mac is now on the speaker's access point
+        inject_keys(:enter)
+      end
+      frames_after_report += 1 if session&.finished? && !session.reporting?
+      frames_after_report > 1
+    end
+    with_test_terminal(100, 30, timeout: 15) do
+      inject_keys(:end, :up, :enter, :enter)
+      app(backend, speaker_opts: { host: "127.0.0.1", port: speaker.port }).run(stop_when: stop)
+      refute_includes screen_text, "Back to your usual Wi-Fi", "banner must go away once online"
+    end
+    assert_empty violations, "reconnect banner shown while the sync was still underway:\n#{violations.first}"
+    assert_operator banner_frames, :>=, 3
+    assert_equal ["syn-tui", "SUCCESS"], [backend.reports.last[0], backend.reports.last[1][:status]]
+    assert_includes sync_screen.session.log.lines, "Report sent to the Merlin backend."
+    assert_equal ["i.jpg", "a.mp3", "playlist-syn-tui.json"].sort, speaker.files.keys.sort
+  ensure
+    speaker&.stop
   end
 
   def test_reconnect_banner_clears_by_itself_once_online

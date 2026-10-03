@@ -19,9 +19,35 @@ bin/merlin                            # full-screen terminal UI (same as `bin/me
 * **On my speaker.** The speaker's content tree. `space` marks items and `d` queues the marked ones (or the current one) for removal. `c` jumps to the catalog.
 * **Browse / Search the catalog.** `enter` opens categories, collections and contents. `a` adds the marked episodes, or the collection under the cursor. Inside a collection, `A` adds every episode.
 * **Basket.** Pending adds and removals. `x` cancels the marked ones, `s` starts a sync.
-* **Sync now.** Runs the full transfer in the background with a live log. When it's time, a banner shows the speaker's Wi-Fi name and password; join it and press `enter`. You can switch on automatic Wi-Fi switching (macOS `networksetup`) before starting. `ctrl-c` aborts, and the abort is reported to Merlin.
+* **Sync now.** Runs the full transfer in the background with a live log. When it's time, a banner shows the speaker's Wi-Fi name and password; join it and press `enter`. You can switch on automatic Wi-Fi switching (macOS `networksetup`) before starting. When you start, the TUI briefly hands the terminal to `sudo` for your admin password; that's for the traffic filter described below, on by default. `ctrl-c` aborts, and the abort is reported to Merlin.
 
   Nothing talks to the Merlin API while you're on the speaker's Wi-Fi. After the transfer, a second banner asks you to rejoin your usual network. The report is sent as soon as Merlin is reachable again. If you skip the wait with `enter`, the report is saved and sent at the next sync.
+
+### Why syncs need admin rights: the traffic filter
+
+The speaker crashes if this Mac's other traffic reaches it. Joining its Wi-Fi makes the speaker (`192.168.4.1`) the gateway and DNS server for the whole Mac. Every app's reconnects, DNS lookups and captive-portal checks then hit a small device with no internet behind it, and it resets and reboots about 15 s later. The Android app avoids this by binding itself to the speaker network (`requestNetwork` + `bindProcessToNetwork`), so the speaker only ever sees the app's own connection.
+
+On macOS, `sync` reproduces that with a temporary `pf` rule in the `com.apple/merlin` anchor:
+
+```
+pass out quick on en0 proto tcp from 192.168.4.0/24 to 192.168.4.1 port 50000
+pass out quick on en0 proto udp from any port 68 to any port 67
+block out quick on en0 from 192.168.4.0/24 to any
+```
+
+* **What it allows:** only the transfer and DHCP leave the Mac from the speaker's subnet. Routing is untouched.
+* **When it's active:** it's applied just before joining the speaker Wi-Fi and removed as soon as the speaker part ends.
+* **Admin password:** `sudo` asks for it once, before downloads. The tool never sees it. The sudo session is kept alive during long transfers.
+* **Leftovers:** if a sync dies, the next one removes the old rule first, or you can run `bin/merlin unisolate`.
+* **Opting out:** use `--no-isolate` or the toggle in the TUI. The speaker will likely crash.
+
+### Speaker log and recovery
+
+The speaker protocol is traced to `~/.config/merlin/logs/speaker-YYYY-MM-DD.log`: every command and reply with file names, status names and timings, plus timeouts and reconnects. Wi-Fi credentials are never written. Each file's result is also included in the sync report sent to Merlin.
+
+Like the app, a sync survives a speaker that stops answering. On a timeout or a dropped connection, it reconnects and retries the operation, up to 8 more times. Each reconnect attempt gets 15 s, and in auto mode it first rejoins the speaker Wi-Fi. A failed reconnect counts as one retry. Together this covers drops of a minute or two, such as macOS briefly leaving the speaker access point. The first connection goes through the same retries. Files that already arrived are skipped by the existence check. A refusal from the speaker (e.g. `NOT_ENOUGH_SPACE`) is not retried.
+
+Apart from applying the playlist, no single wait on the speaker exceeds 15 s. Commands, existence checks and upload acceptance get 5 s, as does any stalled send. An upload is then confirmed within 5 s plus 1 s per MB, capped at 15 s. TCP connect gets 3 s and the ping after a (re)connect gets 3 s. Applying the playlist gets 120 s per attempt, because the speaker rebuilds its library. Firmware updates get 15 s. Both are retried like everything else. After the transfer, the report waits up to 15 s for internet; otherwise it is sent at the next sync.
 
 ### HTTP log
 

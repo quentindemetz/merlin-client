@@ -63,6 +63,21 @@ class SyncTest < Minitest::Test
     end
   end
 
+  class FakeIsolation
+    def initialize(events) = (@events = events) && (@on = false)
+    def active? = @on
+
+    def enable!
+      @on = true
+      @events << :filter_on
+    end
+
+    def disable!
+      @on = false
+      @events << :filter_off
+    end
+  end
+
   class NoWifi
     def initialize(net) = @net = net
     def join_speaker(*) = @net.on_speaker = true
@@ -124,6 +139,38 @@ class SyncTest < Minitest::Test
     assert_equal 8_000_000, body[:sd_size]
   end
 
+  # Root cause of the crashes: the Mac's other traffic reaching the speaker.
+  # The filter must be on before joining its Wi-Fi and off once the speaker
+  # part is over, before going back home.
+  def test_traffic_filter_wraps_the_speaker_part
+    events = []
+    iso = FakeIsolation.new(events)
+    wifi = NoWifi.new(@net)
+    wifi.define_singleton_method(:join_speaker) { |*| events << :join; @net.on_speaker = true }
+    wifi.define_singleton_method(:restore) { events << :restore; @net.on_speaker = false }
+    Merlin::Sync.new(backend: @backend, cache_dir: @dir, wifi: wifi, isolation: iso,
+                     speaker_opts: { host: "127.0.0.1", port: @fake.port },
+                     on_transfer_end: ->(_) { events << :transfer_end }, out: StringIO.new).run
+    assert_equal %i[filter_on join transfer_end filter_off restore], events
+    assert_equal "SUCCESS", @backend.reports.last[1][:status]
+  end
+
+  def test_sync_does_not_join_the_speaker_if_the_filter_cannot_be_applied
+    joined = false
+    iso = Object.new
+    iso.define_singleton_method(:enable!) { raise Merlin::Error, "pfctl -E failed" }
+    iso.define_singleton_method(:active?) { false }
+    wifi = NoWifi.new(@net)
+    wifi.define_singleton_method(:join_speaker) { |*| joined = true }
+    err = assert_raises(Merlin::Error) do
+      Merlin::Sync.new(backend: @backend, cache_dir: @dir, wifi: wifi, isolation: iso, internet_wait: 0,
+                       speaker_opts: { host: "127.0.0.1", port: @fake.port }, out: StringIO.new).run
+    end
+    assert_match(/pfctl/, err.message)
+    refute joined
+    assert_equal "FAIL", @backend.reports.last[1][:status]
+  end
+
   def test_no_api_call_while_on_speaker_wifi
     run_sync
     assert_empty @net.offline_calls, "Merlin API was called while on the speaker's Wi-Fi"
@@ -147,6 +194,126 @@ class SyncTest < Minitest::Test
     run_sync
     assert_equal %w[SUCCESS SUCCESS], @backend.reports.map { |_, b| b[:status] || b["status"] }
     refute File.exist?(File.join(@dir, "pending_report.json"))
+  end
+
+  def fast_sync(out = StringIO.new)
+    Merlin::Sync.new(backend: @backend, cache_dir: @dir, wifi: NoWifi.new(@net), internet_wait: 0,
+                     speaker_opts: { host: "127.0.0.1", port: @fake.port, ack_timeout: 0.3 }, out: out)
+                .tap { |s| s.define_singleton_method(:pause) { |*| nil } }
+  end
+
+  # Verte at image 36: the speaker stops answering an upload. Like the app,
+  # reconnect and carry on instead of failing the whole sync.
+  def test_recovers_when_speaker_stops_answering_an_upload
+    @fake.silent_uploads = [2] # the audio file (images go first)
+    out = StringIO.new
+    fast_sync(out).run
+
+    assert_equal @audio, @fake.files["a1.mp3"]
+    assert_equal PLAYLIST, @fake.files["playlist-syn-42.json"]
+    assert_equal 2, @fake.connections
+    assert_match(%r{speaker didn't respond during audio 1/1 a1\.mp3 .*reconnecting in 2s \(retry 1/8\)}, out.string)
+    id, body = @backend.reports.last
+    assert_equal ["syn-42", "SUCCESS"], [id, body[:status]]
+    assert(body[:logs].any? { _1.include?("[audio 1/1] a1.mp3 (250000 B) uploaded") }, "per-file results are reported")
+  end
+
+  # The run that failed at audio 4/6: after the drop, TCP reconnects but the
+  # speaker doesn't answer the first ping yet. Keep reconnecting, don't abort.
+  def test_reconnect_survives_a_speaker_not_ready_yet
+    @fake.silent_uploads = [2]
+    @fake.silent_pings = [2] # 1 = initial ping, 2 = first ping after reconnecting
+    traces = []
+    sync = Merlin::Sync.new(backend: @backend, cache_dir: @dir, wifi: NoWifi.new(@net), internet_wait: 0,
+                            speaker_opts: { host: "127.0.0.1", port: @fake.port, ack_timeout: 0.3,
+                                            logger: ->(m) { traces << m } }, out: StringIO.new)
+    sync.define_singleton_method(:pause) { |*| nil }
+    sync.run
+
+    assert_equal "SUCCESS", @backend.reports.last[1][:status]
+    assert_equal @audio, @fake.files["a1.mp3"]
+    assert_equal 3, @fake.connections # original, reconnect with silent ping, working reconnect
+    assert(traces.any? { _1.start_with?("!! link problem during audio 1/1 a1.mp3") && _1.include?("mac wifi ip=") })
+    assert(traces.any? { _1.start_with?("reconnect attempt failed: timed out waiting for cmd 2") })
+    assert(traces.any? { _1.start_with?("reconnected — mac wifi ip=") })
+  end
+
+  # Verte at 22:12: the speaker drops the session, then accepts-and-resets new
+  # connections for a while before working again.
+  def test_rides_out_speaker_resetting_new_connections
+    @fake.silent_uploads = [2]
+    @fake.reset_after_drop = 3
+    out = StringIO.new
+    fast_sync(out).run
+    assert_equal "SUCCESS", @backend.reports.last[1][:status]
+    assert_equal @audio, @fake.files["a1.mp3"]
+    assert_equal 5, @fake.connections # working, 3 reset at once, working again
+    refute_includes out.string, "setsockopt"
+    assert_match(/the speaker (reset|closed) the connection|socket closed by speaker/, out.string)
+  end
+
+  def test_rides_out_several_consecutive_failures
+    @fake.silent_uploads = (2..6).to_a # 5 failures in a row, then the speaker answers again
+    fast_sync.run
+    assert_equal "SUCCESS", @backend.reports.last[1][:status]
+    assert_equal 6, @fake.connections
+  end
+
+  def test_gives_up_after_all_retries_when_speaker_stays_silent
+    @fake.silent_uploads = (2..100).to_a
+    sync = fast_sync
+    pauses = []
+    sync.define_singleton_method(:pause) { |s| pauses << s }
+    err = assert_raises(Merlin::Sync::Failure) { sync.run }
+    assert_equal "508_FAILED_ON_SDK_TIMEOUT", err.code
+    assert_equal 1 + Merlin::Sync::LINK_RETRIES, @fake.connections # first try + one reconnect per retry
+    # Retries are spread out (instant-fail reconnects used to burn all 8 in ~18 s).
+    assert_equal Merlin::Sync::BACKOFF, pauses
+    assert_operator pauses.sum, :>=, 80
+    assert_equal "508_FAILED_ON_SDK_TIMEOUT", @backend.reports.last[1][:status_code]
+  end
+
+  def test_unreachable_at_first_is_retried_then_reported_as_connection_failure
+    closed = TCPServer.new("127.0.0.1", 0).then { |s| s.addr[1].tap { s.close } }
+    sync = Merlin::Sync.new(backend: @backend, cache_dir: @dir, wifi: NoWifi.new(@net), internet_wait: 0,
+                            speaker_opts: { host: "127.0.0.1", port: closed }, out: out = StringIO.new)
+    sync.define_singleton_method(:pause) { |*| nil }
+    stub_window(0) do
+      err = assert_raises(Merlin::Sync::Failure) { sync.run }
+      assert_equal "510_FAILED_ON_SDK_ESTABLISH_CONNEXION", err.code
+    end
+    assert_equal Merlin::Sync::LINK_RETRIES, out.string.scan("speaker not reachable yet").size
+  end
+
+  def stub_window(value)
+    old = Merlin::Sync::LINK_WINDOW
+    Merlin::Sync.send(:remove_const, :LINK_WINDOW)
+    Merlin::Sync.const_set(:LINK_WINDOW, value)
+    yield
+  ensure
+    Merlin::Sync.send(:remove_const, :LINK_WINDOW)
+    Merlin::Sync.const_set(:LINK_WINDOW, old)
+  end
+
+  def test_speaker_refusal_is_not_retried
+    @fake.upload_refusal = 2 # NOT_ENOUGH_SPACE
+    err = assert_raises(Merlin::Sync::Failure) { fast_sync.run }
+    assert_equal "502_FAILED_ON_SDK_UPLOAD_FILE", err.code
+    assert_match(/NOT_ENOUGH_SPACE/, err.message)
+    assert_equal 1, @fake.connections
+  end
+
+  def test_speaker_log_traces_the_protocol_without_wifi_credentials
+    lines = []
+    Merlin::Sync.new(backend: @backend, cache_dir: @dir, wifi: NoWifi.new(@net),
+                     speaker_opts: { host: "127.0.0.1", port: @fake.port, logger: ->(m) { lines << m } }).run
+    trace = lines.join("\n")
+    assert_includes trace, "-> upload_file a1.mp3 (250000 B)"
+    assert_match(/<- upload_file SHA256_VALID \[\d+ms\]/, trace)
+    assert_includes trace, "-> search_file u1.jpg verify=true"
+    assert_includes trace, "-> update_playlist playlist-syn-42.json"
+    assert_includes trace, "-> set_wifi [REDACTED]"
+    refute_includes trace, "Home"
   end
 
   def test_second_sync_skips_downloads_and_uploads

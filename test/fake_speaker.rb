@@ -9,7 +9,21 @@ require_relative "../lib/merlin/protocol"
 class FakeSpeaker
   include Merlin::Protocol
 
-  attr_reader :port, :files, :commands, :playlist_updates, :date, :hours, :wifi
+  attr_reader :port, :files, :commands, :playlist_updates, :date, :hours, :wifi, :connections
+
+  # Fault injection:
+  #   silent_uploads: upload-header numbers (1-based, across connections) the
+  #                   speaker never answers — what Verte did at image 36.
+  #   upload_refusal: status code returned to every upload header instead of 0.
+  #   silent_pings:   ping numbers (1-based) left unanswered, like a speaker that
+  #                   accepts TCP right after rebooting but is not ready yet.
+  #   reset_after_drop: after a silent upload, this many new connections are
+  #                   accepted then reset at once (TCP RST), as Verte did while
+  #                   its transfer service restarted.
+  attr_accessor :silent_uploads, :upload_refusal, :silent_pings, :reset_after_drop
+  #   legacy_search_layout: search reply without the size field (what the
+  #                   app 1.20.5 code expects) instead of the real firmware's.
+  attr_accessor :legacy_search_layout
 
   def initialize
     @server = TCPServer.new("127.0.0.1", 0)
@@ -17,6 +31,11 @@ class FakeSpeaker
     @files = {}
     @commands = []
     @playlist_updates = []
+    @connections = 0
+    @upload_headers = 0
+    @silent_uploads = []
+    @silent_pings = []
+    @pings = 0
     @thread = Thread.new { serve }
     @thread.report_on_exception = false
   end
@@ -31,6 +50,13 @@ class FakeSpeaker
   def serve
     loop do
       client = @server.accept
+      @connections += 1
+      if @resets_pending.to_i.positive?
+        @resets_pending -= 1
+        client.setsockopt(Socket::SOL_SOCKET, Socket::SO_LINGER, [1, 0].pack("ii")) # close => RST
+        client.close
+        next
+      end
       handle(client)
     rescue IOError, Errno::EBADF
       break
@@ -66,7 +92,10 @@ class FakeSpeaker
   def dispatch(sock, frame)
     p = frame.payload
     case frame.cmd
-    when Cmd::PING, Cmd::END_SYNCHRONIZATION, Cmd::RESET
+    when Cmd::PING
+      @pings += 1
+      reply(sock, frame.cmd, "") unless @silent_pings.include?(@pings)
+    when Cmd::END_SYNCHRONIZATION, Cmd::RESET
       reply(sock, frame.cmd, "")
     when Cmd::AVAILABLE_SPACE then reply(sock, frame.cmd, [1_000_000].pack("V"))
     when Cmd::TOTAL_SIZE then reply(sock, frame.cmd, [8_000_000].pack("V"))
@@ -90,7 +119,9 @@ class FakeSpeaker
     when Cmd::SEARCH_FILE
       name = p.byteslice(1..)
       if @files.key?(name)
-        reply(sock, frame.cmd, [0, name.bytesize].pack("C2") + name + Digest::SHA256.digest(@files[name]))
+        # Real firmware 2.1.16 layout (captured from Verte): size before the hash.
+        size = legacy_search_layout ? "".b : [@files[name].bytesize].pack("V")
+        reply(sock, frame.cmd, [0, name.bytesize].pack("C2") + name + size + Digest::SHA256.digest(@files[name]))
       else
         reply(sock, frame.cmd, "\x01")
       end
@@ -103,6 +134,15 @@ class FakeSpeaker
       name = p.byteslice(1, n)
       size = p.byteslice(1 + n, 4).unpack1("V")
       sha = p.byteslice(5 + n, 32)
+      @upload_headers += 1
+      if @silent_uploads.include?(@upload_headers) # never answer
+        @resets_pending = @reset_after_drop.to_i
+        return nil
+      end
+      if @upload_refusal
+        reply(sock, frame.cmd, [@upload_refusal].pack("C"))
+        return nil
+      end
       if @files[name] && Digest::SHA256.digest(@files[name]) == sha
         reply(sock, frame.cmd, "\x01")
         return nil

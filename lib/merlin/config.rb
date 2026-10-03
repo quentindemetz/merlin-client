@@ -23,6 +23,11 @@ module Merlin
 
     # echo: optional ->(line) receiving a one-line summary per exchange.
     def http_log(echo: nil) = HttpLog.new(dir: log_dir, echo: echo)
+    def speaker_log(echo: nil) = SpeakerLog.new(dir: log_dir, echo: echo)
+
+    def isolation(out: $stdout, speaker_ip: Speaker::DEFAULT_HOST, port: Speaker::DEFAULT_PORT)
+      Isolation.new(state_path: File.join(home, "isolation.json"), speaker_ip: speaker_ip, port: port, out: out)
+    end
 
     def settings
       @settings ||= File.exist?(settings_path) ? JSON.parse(File.read(settings_path)) : {}

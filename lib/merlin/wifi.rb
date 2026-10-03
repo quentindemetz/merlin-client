@@ -14,8 +14,21 @@ module Merlin
       @out = out
     end
 
+    # After a lost link: macOS tends to drop the speaker's internet-less AP.
+    # Rejoin it, but only if we're actually off its 192.168.4.x subnet.
+    def rejoin_speaker
+      return unless @auto && @speaker_ssid
+      return if `ipconfig getifaddr #{interface} 2>/dev/null`.start_with?("192.168.4.")
+
+      @out.puts "Rejoining speaker Wi-Fi #{@speaker_ssid.inspect}..."
+      run!("networksetup", "-setairportnetwork", interface, @speaker_ssid, *@speaker_password)
+    rescue Error => e
+      @out.puts "Could not rejoin #{@speaker_ssid}: #{e.message}"
+    end
+
     def join_speaker(ssid, password)
       @speaker_ssid = ssid
+      @speaker_password = password
       if @auto && ssid
         @home_ssid ||= current_ssid
         @out.puts "Joining speaker Wi-Fi #{ssid.inspect} on #{interface}..."
