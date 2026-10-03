@@ -145,11 +145,11 @@ class BackendTest < Minitest::Test
     silent = TCPServer.new("127.0.0.1", 0)
     hold = Thread.new { loop { (@held ||= []) << silent.accept } }
     stub_const(:API_BASE, "http://127.0.0.1:#{silent.addr[1]}/api/v1/")
-    stub_const(:API_TIMEOUT, 1)
+    stub_const(:API_TIMEOUT, 0.2)
     @backend.login("a", "pw")
     started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
     assert_raises(Merlin::OfflineError) { @backend.selections }
-    assert_operator Process.clock_gettime(Process::CLOCK_MONOTONIC) - started, :<, 3
+    assert_operator Process.clock_gettime(Process::CLOCK_MONOTONIC) - started, :<, 1
   ensure
     hold&.kill
     silent&.close

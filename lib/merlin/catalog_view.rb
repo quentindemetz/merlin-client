@@ -116,10 +116,21 @@ module Merlin
         "#{" [#{flags.join(', ')}]" unless flags.empty?}".rstrip
     end
 
+    # The API sends min_age/max_age = 0 when no age is set (nearly every
+    # episode, most collections); some items carry an age tag instead
+    # (taxonomies of type TAG such as "7 ans et +").
     def ages(x)
-      return nil unless x["min_age"] || x["max_age"]
+      min = x["min_age"].to_i
+      max = x["max_age"].to_i
+      if min.positive? && max.positive? then "#{min}-#{max} ans"
+      elsif min.positive? then "#{min} ans et +"
+      elsif max.positive? then "jusqu'à #{max} ans"
+      else age_tag(x)
+      end
+    end
 
-      "#{x['min_age']}-#{x['max_age']} ans"
+    def age_tag(x)
+      Array(x["taxonomies"]).find { |t| t.is_a?(Hash) && t["type"] == "TAG" && t["title"].to_s.match?(/\A\d+\s*ans\b/) }&.dig("title")
     end
 
     def episodes(x) = x["nb_episode"].to_i.positive? ? "#{x['nb_episode']} ép." : nil

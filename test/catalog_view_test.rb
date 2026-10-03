@@ -71,6 +71,25 @@ class CatalogViewTest < Minitest::Test
     assert_equal "(no pending selection)", V.selections([])
   end
 
+  # Shapes seen in the real API responses (HTTP log, 2026-10-02/03).
+  def test_ages
+    assert_nil V.ages("min_age" => 0, "max_age" => 0), "0/0 means 'not set' (nearly every episode)"
+    assert_nil V.ages({})
+    assert_equal "7-15 ans", V.ages("min_age" => 7, "max_age" => 15)
+    assert_equal "5 ans et +", V.ages("min_age" => 5, "max_age" => 0)
+    assert_equal "jusqu'à 6 ans", V.ages("min_age" => 0, "max_age" => 6)
+    tagged = { "min_age" => 0, "max_age" => 0,
+               "taxonomies" => [{ "type" => "CATEGORY", "title" => "Documentaires" },
+                                { "type" => "TAG", "title" => "Entre 5 et 15 minutes" },
+                                { "type" => "TAG", "title" => "7 ans et +" }] }
+    assert_equal "7 ans et +", V.ages(tagged)
+  end
+
+  def test_unset_age_is_not_displayed
+    assert_equal "[collection] c1  Odyssées  (12 ép.)",
+                 V.element("collection" => { "id" => "c1", "title" => "Odyssées", "min_age" => 0, "max_age" => 0, "nb_episode" => 12 })
+  end
+
   def test_search_results
     assert_equal "[collection] c1  Odyssées\n[content] k1  Le loup",
                  V.search([{ "collection" => { "id" => "c1", "title" => "Odyssées" } },

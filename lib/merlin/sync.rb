@@ -209,13 +209,20 @@ module Merlin
       raise Failure.new("502_FAILED_ON_SDK_UPLOAD_FILE", e.message)
     end
 
-    # Many short attempts, spaced out: after a drop the speaker typically
-    # accepts-and-resets connections for 40-80 s (as if its transfer service
-    # restarts), and those attempts fail instantly — so spacing, not the
-    # per-attempt LINK_WINDOW, is what makes the retries span the outage.
+    # Safety net for genuine Wi-Fi hiccups. The long outages seen earlier were
+    # the speaker rebooting under the Mac's other traffic, which the traffic
+    # filter (Isolation) now prevents, so retries are quick.
     LINK_RETRIES = 8
-    LINK_WINDOW = 15
-    BACKOFF = [2, 4, 8, 15, 15, 15, 15, 15].freeze # seconds before each retry (~1.5 min total)
+    LINK_WINDOW = 5 # seconds allowed per reconnect attempt
+    BACKOFF = [1, 1, 2, 2, 3, 3, 5, 5].freeze # seconds before each retry (22 s total)
+
+    # Overridable (tests use sub-second values); default to the constants.
+    class << self
+      attr_writer :backoff, :link_window
+
+      def backoff = @backoff || BACKOFF
+      def link_window = @link_window || LINK_WINDOW
+    end
 
     # Runs a speaker operation; if the link fails (timeout, socket closed, TCP
     # error) reconnects and tries again — the app does the same ("Rescue").
@@ -232,15 +239,17 @@ module Merlin
 
         note_link_problem(what, e, attempt)
         @link_down = true
-        pause(BACKOFF.fetch(attempt - 1, BACKOFF.last))
+        pause(retry_pause(attempt))
         retry
       end
     end
 
+    def retry_pause(attempt) = self.class.backoff.fetch(attempt - 1, self.class.backoff.last)
+
     def note_link_problem(what, error, attempt)
       if @connected_once
         say "  speaker didn't respond during #{what} (#{error.message}); reconnecting in " \
-            "#{BACKOFF.fetch(attempt - 1, BACKOFF.last)}s (retry #{attempt}/#{LINK_RETRIES})..."
+            "#{retry_pause(attempt)}s (retry #{attempt}/#{LINK_RETRIES})..."
         say "  (if this Mac left the speaker's Wi-Fi, rejoin #{@speaker_ssid})" if @speaker_ssid && attempt == 1
       else
         say "  speaker not reachable yet (#{error.message}); retrying (#{attempt}/#{LINK_RETRIES})..."
@@ -256,7 +265,7 @@ module Merlin
         @speaker&.close
         @wifi.rejoin_speaker if @wifi.respond_to?(:rejoin_speaker)
       end
-      @speaker = connect_with_retry(*@link, timeout: LINK_WINDOW)
+      @speaker = connect_with_retry(*@link, timeout: self.class.link_window)
       @speaker.ping(timeout: [@speaker_opts.fetch(:ack_timeout, 3), 3].min)
       if @connected_once
         log "Reconnected to the speaker"

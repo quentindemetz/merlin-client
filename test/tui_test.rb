@@ -1,11 +1,25 @@
 # frozen_string_literal: true
 
-require "minitest/autorun"
+require_relative "test_helper"
 require "tmpdir"
 require "ratatui_ruby"
 require "ratatui_ruby/test_helper"
 require_relative "../lib/merlin/tui"
 require_relative "fake_speaker"
+
+Merlin::TUI::TuiWifi.poll_interval = 0.05 # internet re-check while reconnecting (production: 3 s)
+
+# The headless test terminal returns from poll_event immediately, so the UI
+# loop would spin flat out and starve background sync threads: throttle it.
+Merlin::TUI::App.prepend(Module.new do
+  def run(stop_when: nil)
+    throttled = stop_when && lambda do |app|
+      sleep 0.002
+      stop_when.call(app)
+    end
+    super(stop_when: throttled)
+  end
+end)
 
 class TUITest < Minitest::Test
   include RatatuiRuby::TestHelper
@@ -400,7 +414,7 @@ class TUITest < Minitest::Test
   end
 
   def test_reconnect_banner_clears_by_itself_once_online
-    online_after = Time.now + 0.5
+    online_after = Time.now + 0.1
     wifi = Merlin::TUI::TuiWifi.new(auto: false, log: Merlin::TUI::SyncLog.new, online: -> { Time.now > online_after })
     seen = nil
     t = Thread.new { wifi.restore }

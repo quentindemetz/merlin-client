@@ -41,6 +41,13 @@ module Merlin
       # reconnecting: true while we wait for the user to get back online.
       attr_reader :waiting, :reconnecting
 
+      # How often to check whether the Merlin API is reachable again (tests: tiny).
+      class << self
+        attr_writer :poll_interval
+
+        def poll_interval = @poll_interval || 3
+      end
+
       def initialize(auto:, log:, online: -> { true })
         @queue = Queue.new
         @online = online
@@ -63,7 +70,7 @@ module Merlin
 
         @reconnecting = true
         until @online.call
-          return :skip if @queue.pop(timeout: 3)
+          return :skip if @queue.pop(timeout: self.class.poll_interval)
         end
         :online
       ensure

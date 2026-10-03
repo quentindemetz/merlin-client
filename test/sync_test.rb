@@ -1,9 +1,8 @@
 # frozen_string_literal: true
 
-require "minitest/autorun"
+require_relative "test_helper"
 require "tmpdir"
 require "stringio"
-require_relative "../lib/merlin"
 require_relative "fake_speaker"
 
 class SyncTest < Minitest::Test
@@ -198,7 +197,7 @@ class SyncTest < Minitest::Test
 
   def fast_sync(out = StringIO.new)
     Merlin::Sync.new(backend: @backend, cache_dir: @dir, wifi: NoWifi.new(@net), internet_wait: 0,
-                     speaker_opts: { host: "127.0.0.1", port: @fake.port, ack_timeout: 0.3 }, out: out)
+                     speaker_opts: { host: "127.0.0.1", port: @fake.port, ack_timeout: 0.1 }, out: out)
                 .tap { |s| s.define_singleton_method(:pause) { |*| nil } }
   end
 
@@ -212,7 +211,7 @@ class SyncTest < Minitest::Test
     assert_equal @audio, @fake.files["a1.mp3"]
     assert_equal PLAYLIST, @fake.files["playlist-syn-42.json"]
     assert_equal 2, @fake.connections
-    assert_match(%r{speaker didn't respond during audio 1/1 a1\.mp3 .*reconnecting in 2s \(retry 1/8\)}, out.string)
+    assert_match(%r{speaker didn't respond during audio 1/1 a1\.mp3 .*reconnecting in [\d.]+s \(retry 1/8\)}, out.string)
     id, body = @backend.reports.last
     assert_equal ["syn-42", "SUCCESS"], [id, body[:status]]
     assert(body[:logs].any? { _1.include?("[audio 1/1] a1.mp3 (250000 B) uploaded") }, "per-file results are reported")
@@ -225,7 +224,7 @@ class SyncTest < Minitest::Test
     @fake.silent_pings = [2] # 1 = initial ping, 2 = first ping after reconnecting
     traces = []
     sync = Merlin::Sync.new(backend: @backend, cache_dir: @dir, wifi: NoWifi.new(@net), internet_wait: 0,
-                            speaker_opts: { host: "127.0.0.1", port: @fake.port, ack_timeout: 0.3,
+                            speaker_opts: { host: "127.0.0.1", port: @fake.port, ack_timeout: 0.1,
                                             logger: ->(m) { traces << m } }, out: StringIO.new)
     sync.define_singleton_method(:pause) { |*| nil }
     sync.run
@@ -267,9 +266,9 @@ class SyncTest < Minitest::Test
     err = assert_raises(Merlin::Sync::Failure) { sync.run }
     assert_equal "508_FAILED_ON_SDK_TIMEOUT", err.code
     assert_equal 1 + Merlin::Sync::LINK_RETRIES, @fake.connections # first try + one reconnect per retry
-    # Retries are spread out (instant-fail reconnects used to burn all 8 in ~18 s).
-    assert_equal Merlin::Sync::BACKOFF, pauses
-    assert_operator pauses.sum, :>=, 80
+    # One short pause before each of the 8 retries.
+    assert_equal Merlin::Sync.backoff, pauses
+    assert_equal Merlin::Sync::LINK_RETRIES, pauses.size
     assert_equal "508_FAILED_ON_SDK_TIMEOUT", @backend.reports.last[1][:status_code]
   end
 
@@ -286,15 +285,12 @@ class SyncTest < Minitest::Test
   end
 
   def stub_window(value)
-    old = Merlin::Sync::LINK_WINDOW
-    Merlin::Sync.send(:remove_const, :LINK_WINDOW)
-    Merlin::Sync.const_set(:LINK_WINDOW, value)
+    old = Merlin::Sync.link_window
+    Merlin::Sync.link_window = value
     yield
   ensure
-    Merlin::Sync.send(:remove_const, :LINK_WINDOW)
-    Merlin::Sync.const_set(:LINK_WINDOW, old)
+    Merlin::Sync.link_window = old
   end
-
   def test_speaker_refusal_is_not_retried
     @fake.upload_refusal = 2 # NOT_ENOUGH_SPACE
     err = assert_raises(Merlin::Sync::Failure) { fast_sync.run }
