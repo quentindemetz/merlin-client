@@ -24,6 +24,9 @@ class FakeSpeaker
   #   legacy_search_layout: search reply without the size field (what the
   #                   app 1.20.5 code expects) instead of the real firmware's.
   attr_accessor :legacy_search_layout
+  #   verify_rate:    bytes/s at which a verifying search hashes the file
+  #                   (Verte: ~1.6 MB/s, so big MP3s take seconds).
+  attr_accessor :verify_rate
 
   def initialize
     @server = TCPServer.new("127.0.0.1", 0)
@@ -85,7 +88,7 @@ class FakeSpeaker
         pending_upload = dispatch(sock, frame)
       end
     end
-  rescue EOFError, IOError
+  rescue EOFError, IOError, SystemCallError # client gone (e.g. it timed out and hung up)
     sock.close
   end
 
@@ -119,6 +122,8 @@ class FakeSpeaker
     when Cmd::SEARCH_FILE
       name = p.byteslice(1..)
       if @files.key?(name)
+        # Like the real speaker, verifying means reading + hashing the file.
+        sleep(@files[name].bytesize.to_f / verify_rate) if verify_rate && p.getbyte(0) == 1
         # Real firmware 2.1.16 layout (captured from Verte): size before the hash.
         size = legacy_search_layout ? "".b : [@files[name].bytesize].pack("V")
         reply(sock, frame.cmd, [0, name.bytesize].pack("C2") + name + size + Digest::SHA256.digest(@files[name]))

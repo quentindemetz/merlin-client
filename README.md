@@ -20,16 +20,16 @@ bin/merlin                            # full-screen terminal UI (same as `bin/me
 * **My audio files.** Import audio from this Mac into any folder of the speaker, or into a new folder; see below.
 * **Browse / Search the catalog.** `enter` opens categories, collections and contents. `a` adds the marked episodes, or the collection under the cursor. Inside a collection, `A` adds every episode.
 * **Basket.** Pending adds and removals. `x` cancels the marked ones, `s` starts a sync.
-* **Sync now.** Runs the full transfer in the background with a live log. When it's time, a banner shows the speaker's Wi-Fi name and password; join it and press `enter`. You can switch on automatic Wi-Fi switching (macOS `networksetup`) before starting. When you start, the TUI briefly hands the terminal to `sudo` for your admin password; that's for the traffic filter described below, on by default. `ctrl-c` aborts, and the abort is reported to Merlin.
+* **Sync now.** Runs the full transfer in the background with a live log. When it's time, a full-screen prompt asks you to switch the speaker on and press its Wifi / Transfert button. The Mac joins the speaker's network by itself as soon as it appears, and goes back to the network it was on when the sync ends, whether it succeeded or failed (see *Wi-Fi switching* below). The admin password for the traffic filter described below is asked once, when the TUI starts, and covers every sync until you quit. If you skip it with Ctrl-C, the first sync asks instead. `ctrl-c` aborts, and the abort is reported to Merlin.
 
-  Nothing talks to the Merlin API while you're on the speaker's Wi-Fi. After the transfer, a second banner asks you to rejoin your usual network. The report is sent as soon as Merlin is reachable again. If you skip the wait with `enter`, the report is saved and sent at the next sync.
+  Nothing talks to the Merlin API while you're on the speaker's Wi-Fi. The report is sent once the Mac is back online. If Merlin isn't reachable within 15 s, the report is saved and sent at the next sync.
 
 ### Your own audio files
 
 In the TUI, **My audio files** imports audio from this Mac. Press `i` and type or drag-and-drop paths; files and whole folders both work. Then choose where the files go: an existing folder on the speaker, or **➕ New folder in <section>** (Histoires, Musique, Documentaires…). `n` creates an empty folder, `r` renames, and `x` removes.
 
 * **Transcoding (needs `ffmpeg`, `brew install ffmpeg`):** the speaker plays MP3 at 44.1 kHz, either mono 64 kbps or stereo 128 kbps. MP3s already at 44.1 kHz and up to 192 kbps are copied untouched. Everything else is converted, mono to 64 kbps and stereo to 128 kbps.
-* **Covers:** each track gets a 128×128 JPEG cover, taken from the file's artwork or a plain default.
+* **Covers:** each track gets a 128×128 JPEG cover, taken from the file's artwork or a plain default. The speaker doesn't display folder names, so each folder you create gets a cover showing its name: white text sized to fit, on a color derived from the name (needs ImageMagick, `brew install imagemagick`; otherwise a plain cover). Renaming a folder redraws its cover, and so does the "Mes fichiers" fallback folder.
 * **Titles:** they come from the file's title tag, or the file name, and are shortened to the speaker's limit like the server does (60 bytes + "...").
 * **Sync:** files are stored per speaker in `~/.config/merlin/library/` and merged into the playlist from Merlin's servers at every sync. Merlin's servers regenerate the speaker's hierarchy each time, so they have to be re-inserted. Imported files are uploaded with everything else and never sent to Merlin.
 * **Missing folders:** if a folder you chose disappears from the speaker, its tracks go to a "Mes fichiers" folder.
@@ -49,7 +49,7 @@ block out quick on en0 from 192.168.4.0/24 to any
 
 * **What it allows:** only the transfer and DHCP leave the Mac from the speaker's subnet. Routing is untouched.
 * **When it's active:** it's applied just before joining the speaker Wi-Fi and removed as soon as the speaker part ends.
-* **Admin password:** `sudo` asks for it once, before downloads, and the tool never sees it. That single `sudo` starts a small helper with admin rights that only knows "filter on" and "filter off". It lives for the duration of the sync and exits by itself if the app goes away. This works even when sudo is set never to remember the password (`Defaults timestamp_timeout=0`, common on managed Macs, including this one).
+* **Admin password:** `sudo` asks for it once per program session (at TUI startup, or at the start of `merlin sync`), and the tool never sees it. That single `sudo` starts a small helper with admin rights that only knows "filter on" and "filter off". It serves every sync until you quit, then exits, and it also exits by itself if the program dies. This works even when sudo is set never to remember the password (`Defaults timestamp_timeout=0`, common on managed Macs, including this one).
 * **Leftovers:** if a sync dies, the next one removes the old rule first, or you can run `bin/merlin unisolate`.
 * **Opting out:** use `--no-isolate` or the toggle in the TUI. The speaker will likely crash.
 
@@ -59,7 +59,7 @@ The speaker protocol is traced to `~/.config/merlin/logs/speaker-YYYY-MM-DD.log`
 
 Like the app, a sync survives a speaker that stops answering. On a timeout or a dropped connection, it reconnects and retries the operation, up to 8 more times. Retries are quick: pauses of 1, 1, 2, 2, 3, 3, 5 and 5 s (22 s in total), and 5 s per reconnect attempt. In auto mode it first rejoins the speaker Wi-Fi. This is a safety net for genuine Wi-Fi hiccups; the long outages seen during development were the speaker rebooting under the Mac's other traffic, which the traffic filter prevents. Files that already arrived are skipped by the existence check. A refusal from the speaker (e.g. `NOT_ENOUGH_SPACE`) is not retried.
 
-Apart from applying the playlist, no single wait on the speaker exceeds 15 s. Commands, existence checks and upload acceptance get 5 s, as does any stalled send. An upload is then confirmed within 5 s plus 1 s per MB, capped at 15 s. TCP connect gets 3 s and the ping after a (re)connect gets 3 s. Applying the playlist gets 120 s per attempt, because the speaker rebuilds its library. Firmware updates get 15 s. Both are retried like everything else. After the transfer, the report waits up to 15 s for internet; otherwise it is sent at the next sync.
+Apart from applying the playlist, no single wait on the speaker exceeds 15 s. Commands and upload acceptance get 5 s, as does any stalled send. Existence checks get 5 s plus 1 s per MB, because the speaker reads and hashes the whole file first, at about 1.6 MB/s. An upload is then confirmed within 5 s plus 1 s per MB, capped at 15 s. TCP connect gets 3 s and the ping after a (re)connect gets 3 s. Applying the playlist gets 120 s per attempt, because the speaker rebuilds its library. Firmware updates get 15 s. Both are retried like everything else. After the transfer, the report waits up to 15 s for internet; otherwise it is sent at the next sync.
 
 ### HTTP log
 
@@ -81,15 +81,21 @@ Keys everywhere: `↑↓`/`j k`, `PgUp`/`PgDn`, `enter`, `esc` back, and `q` qui
 bin/merlin login you@example.com      # Hello Merlin account (password prompted)
 bin/merlin speakers                   # list speakers; `bin/merlin use ID` to pick one
 bin/merlin sync                       # full transfer
-bin/merlin sync --auto-wifi           # same, switching Wi-Fi via networksetup
 bin/merlin sync --dry-run             # create synchro + download files only
 ```
 
 `sync` first talks to the cloud (to get the plan and download files), then asks
-you to switch the speaker on, press its **Wifi / Transfert** button, and join
-its `MERLIN…` Wi-Fi network. After the transfer you switch back and it sends the
-report. With `--auto-wifi` it switches networks for you using `networksetup`. Add
-`--home-ssid` if macOS won't tell it the name of your current network.
+you to switch the speaker on and press its **Wifi / Transfert** button. The Mac
+joins the speaker's network by itself, transfers, reconnects to your usual network
+and sends the report.
+
+### Wi-Fi switching
+
+1. **Remember:** right after Merlin answers the first request of a sync, the name of the network the Mac is on is noted. A `MERLIN…` network is never noted.
+2. **Join:** the speaker's network is looked for every 3 s, and the Mac joins it as soon as it appears (with its password from the sync plan). It gives up after 10 min.
+3. **Go back:** after the transfer, success or failure, the speaker network is removed from the Mac's saved networks and the Mac rejoins the remembered one. If that's impossible, Wi-Fi is turned off and on so macOS auto-joins its preferred network.
+
+Since macOS 14, the current network's name and scan results are only available to apps with **Location Services**. A tiny background app, *Merlin Wi-Fi* (`lib/merlin/wifi_helper/`), is compiled once into `~/.config/merlin/` with the Xcode command-line tools and asks for that permission. The TUI (at startup) and `merlin sync` check it up front, so macOS's dialog appears while you're there; click **Allow**. Without it, the Mac keeps trying to join the speaker directly and lets macOS pick the network back.
 
 Browsing the catalog and choosing what goes on the speaker. Every listed line
 starts with a kind and an id, which you pass to the next command. Add `--json`

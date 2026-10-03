@@ -177,7 +177,7 @@ class SyncTest < Minitest::Test
                                            sample_rate: 48_000, channels: 1, bit_rate: 768_000, has_cover: false)
     def prepare_audio(_src, dest, _info) = File.write(dest, "MP3 of papa") && :transcoded
     def prepare_cover(_src, dest, _info) = File.write(dest, "cover of papa") && :default
-    def default_cover(dest) = FileUtils.mkdir_p(File.dirname(dest)) && File.write(dest, "folder cover")
+    def folder_cover(title, dest) = File.write(dest, "cover titled #{title}") && :titled
   end
 
   def test_imported_audio_is_added_to_the_speaker
@@ -191,7 +191,7 @@ class SyncTest < Minitest::Test
 
     assert_equal "MP3 of papa", @fake.files["#{track.uuid}.mp3"]
     assert_equal "cover of papa", @fake.files["#{track.uuid}.jpg"]
-    assert_equal "folder cover", @fake.files["#{folder.uuid}.jpg"]
+    assert_equal "cover titled Mes histoires", @fake.files["#{folder.uuid}.jpg"]
     tree = JSON.parse(@fake.files["playlist-syn-42.json"])
     assert_equal ["Le loup", "Mes histoires"], tree[0]["child"].map { _1["title"] }
     assert_equal ["Histoire de papa"], tree[0]["child"][1]["child"].map { _1["title"] }

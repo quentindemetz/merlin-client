@@ -58,6 +58,22 @@ class MediaTest < Minitest::Test
     assert_jpeg_128(cover)
   end
 
+  def test_folder_cover_renders_the_name
+    skip "ImageMagick not installed" unless M.imagemagick?
+    a = File.join(@dir, "a.jpg")
+    assert_equal :titled, M.folder_cover("Comptines de mamie", a)
+    assert_jpeg_128(a)
+    # background (corner pixel) uses the name's palette color; the text is white
+    expected = M::FOLDER_COLORS[Zlib.crc32("Comptines de mamie") % M::FOLDER_COLORS.size]
+    corner, = Open3.capture2("magick", a, "-format", "%[hex:p{2,2}]", "info:")
+    assert_in_delta expected.delete("#").to_i(16) >> 16, corner.to_i(16) >> 16, 12 # red channel, JPEG-tolerant
+    # '@' and '%' are text, not ImageMagick directives (no file read, no escapes)
+    b = File.join(@dir, "b.jpg")
+    assert_equal :titled, M.folder_cover("@/etc/hosts 100%w", b)
+    assert_jpeg_128(b)
+    refute_equal File.binread(a), File.binread(b)
+  end
+
   def test_files_without_audio_are_rejected
     png = gen("pic.png", "-f", "lavfi", "-i", "color=blue:s=10x10", "-frames:v", "1")
     err = assert_raises(Merlin::Error) { M.probe(png) }

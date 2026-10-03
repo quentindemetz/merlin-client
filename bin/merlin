@@ -77,9 +77,6 @@ module Merlin
         o.on("--host HOST", "Speaker address (default #{Speaker::DEFAULT_HOST})") { |v| @opts[:host] = v }
         o.on("--port PORT", Integer, "Speaker port (default #{Speaker::DEFAULT_PORT})") { |v| @opts[:port] = v }
         o.on("--setting-id ID", "Speaker (settings id) to sync, overrides `use`") { |v| @opts[:setting_id] = v }
-        o.on("--auto-wifi", "sync: switch Wi-Fi automatically with networksetup") { @opts[:auto_wifi] = true }
-        o.on("--wifi-interface IF", "Wi-Fi interface for --auto-wifi (default: detected)") { |v| @opts[:iface] = v }
-        o.on("--home-ssid SSID", "Network to rejoin after --auto-wifi") { |v| @opts[:home_ssid] = v }
         o.on("--dry-run", "sync: create synchro and download files only") { @opts[:dry_run] = true }
         o.on("--no-isolate", "sync: don't filter this Mac's other traffic (the speaker may crash)") { @opts[:no_isolate] = true }
         o.on("--json", "Catalog commands: print the raw API JSON") { @opts[:json] = true }
@@ -126,11 +123,15 @@ module Merlin
       raise Error, "not logged in (run `merlin login`)" unless backend.logged_in?
 
       backend.setting_id = setting_id
-      wifi = Wifi.new(auto: @opts[:auto_wifi], interface: @opts[:iface], home_ssid: @opts[:home_ssid])
+      network = config.network
+      WifiPermission.check(network) unless @opts[:dry_run]
+      wifi = Wifi.new(network: network)
       isolation = isolation_for_sync
       plan = Sync.new(backend: backend, cache_dir: config.cache_dir, wifi: wifi, isolation: isolation,
                       speaker_opts: speaker_opts, dry_run: @opts[:dry_run]).run
       puts "Plan saved to #{File.join(config.cache_dir, 'last_synchro.json')}" if @opts[:dry_run] && plan
+    ensure
+      isolation&.shutdown_helper
     end
 
     # Unless --no-isolate: ask for the admin password now (before downloads)
@@ -154,7 +155,8 @@ module Merlin
       require_relative "../lib/merlin/tui"
       # The TUI owns the screen: no stderr logging, speaker host/port still apply.
       TUI::App.new(backend: Backend.new(token_store: config.token_store, http_log: config.http_log), config: config,
-                   speaker_opts: { host: @opts[:host], port: @opts[:port], logger: config.speaker_log }).run
+                   speaker_opts: { host: @opts[:host], port: @opts[:port], logger: config.speaker_log })
+             .run(preauthorize: !@opts[:no_isolate]) # admin password once, for every sync of this session
     end
 
     # --- catalog -------------------------------------------------------------
@@ -228,7 +230,7 @@ module Merlin
 
     def cmd_exists(name)
       with_speaker do |s|
-        r = s.search_file(name, verify: true)
+        r = s.search_file(name, verify: true, timeout: 60) # size unknown: the speaker hashes at ~1.6 MB/s
         puts r[:found] ? "found  sha256=#{r[:sha256]}" : "not found"
       end
     end

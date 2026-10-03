@@ -19,7 +19,8 @@ module Merlin
 
       # isolation_factory: ->(out:) { Isolation or nil } — the traffic filter used
       # during transfers (injectable so tests never touch the real firewall).
-      def initialize(backend:, config:, speaker_opts: {}, sync_factory: nil, isolation_factory: nil)
+      def initialize(backend:, config:, speaker_opts: {}, sync_factory: nil, isolation_factory: nil, network: nil)
+        @network = network
         @backend = backend
         @config = config
         @speaker_opts = speaker_opts
@@ -30,7 +31,10 @@ module Merlin
       end
 
       # stop_when: test hook evaluated every frame.
-      def run(stop_when: nil)
+      # preauthorize: ask for admin rights (traffic filter) before going
+      # full-screen, once for the whole session.
+      def run(stop_when: nil, preauthorize: false)
+        authorize_at_startup if preauthorize
         RatatuiRuby.run do |tui|
           @tui = tui
           push(Screens::MainMenu.new(self))
@@ -44,6 +48,29 @@ module Merlin
         end
       ensure
         active_sync&.shutdown # a sync still waiting to report saves it for next time
+        @isolation&.shutdown_helper # the admin helper lives exactly as long as the program
+      end
+
+      # The traffic filter, shared by every sync of this session so the admin
+      # password is asked at most once (nil when disabled, e.g. in tests).
+      def isolation
+        return @isolation if defined?(@isolation)
+
+        @isolation = @isolation_factory.call(out: $stdout)
+      end
+
+      def authorize_at_startup
+        authorize_admin if isolation
+        WifiPermission.check(network)
+      end
+
+      def authorize_admin
+        puts "Syncing needs admin rights to keep this Mac's other traffic away from the speaker"
+        puts "(it crashes the speaker). Enter your password once for this session, or Ctrl-C to skip:"
+        isolation.authorize!
+      rescue Error, Interrupt
+        puts "\nSkipped — you'll be asked when you start a sync."
+        sleep 1
       end
 
       # --- navigation ----------------------------------------------------------
@@ -101,9 +128,11 @@ module Merlin
 
       def new_sync(**) = @sync_factory.call(**)
 
+      # This Mac's Wi-Fi, shared by syncs (tests inject a fake).
+      def network = @network ||= config.network
+
       # Audio imported from this Mac for the selected speaker.
       def library = config.library
-      def new_isolation(out:) = @isolation_factory.call(out: out)
 
       # Hands the real terminal back (e.g. for sudo's password prompt), then
       # resumes the full-screen UI.

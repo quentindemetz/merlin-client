@@ -90,6 +90,22 @@ class SpeakerTest < Minitest::Test
     assert_equal :uploaded, @speaker.sync_file("g.jpg", data)
   end
 
+  # Verte took ~5.4 s to verify an 8.6 MB MP3 and the fixed 5 s timeout never
+  # let it answer. The wait now grows with the file size.
+  def test_verifying_search_waits_in_proportion_to_file_size
+    @speaker.close # the fake serves one connection at a time
+    speaker = Merlin::Speaker.new(host: "127.0.0.1", port: @fake.port, ack_timeout: 0.1).connect
+    data = Random.new(3).bytes(500_000)
+    @fake.files["big.mp3"] = data
+    @fake.verify_rate = 2_500_000 # 0.2 s to hash: longer than the 0.1 s base timeout
+    assert_raises(Merlin::SpeakerTimeout) { speaker.search_file("big.mp3") } # size unknown: base timeout only
+    speaker.close
+    speaker = Merlin::Speaker.new(host: "127.0.0.1", port: @fake.port, ack_timeout: 0.1).connect
+    assert_equal :already_present, speaker.sync_file("big.mp3", data)
+  ensure
+    speaker&.close
+  end
+
   def test_search_missing
     assert_equal({ found: false, sha256: nil }, @speaker.search_file("nope.mp3"))
   end

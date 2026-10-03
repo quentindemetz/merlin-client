@@ -7,17 +7,17 @@ require "ratatui_ruby/test_helper"
 require_relative "../lib/merlin/tui"
 require_relative "fake_speaker"
 
-Merlin::TUI::TuiWifi.poll_interval = 0.05 # internet re-check while reconnecting (production: 3 s)
+require_relative "fake_network"
 
 # The headless test terminal returns from poll_event immediately, so the UI
 # loop would spin flat out and starve background sync threads: throttle it.
 Merlin::TUI::App.prepend(Module.new do
-  def run(stop_when: nil)
+  def run(stop_when: nil, **opts)
     throttled = stop_when && lambda do |app|
       sleep 0.002
       stop_when.call(app)
     end
-    super(stop_when: throttled)
+    super(stop_when: throttled, **opts)
   end
 end)
 
@@ -143,18 +143,63 @@ class TUITest < Minitest::Test
   def teardown = FileUtils.rm_rf(@dir)
 
   # No real firewall in tests: isolation is off unless a test provides one.
-  def app(backend, isolation_factory: ->(out:) { nil }, **)
-    Merlin::TUI::App.new(backend: backend, config: @config, isolation_factory: isolation_factory, **)
+  def app(backend, isolation_factory: ->(out:) { nil }, network: FakeNetwork.new(speaker: "MERLIN_TUI"), **)
+    Merlin::TUI::App.new(backend: backend, config: @config, isolation_factory: isolation_factory, network: network, **)
   end
 
   class RecordingIsolation
     attr_reader :calls
 
+    attr_writer :out
+
     def initialize = @calls = []
-    def authorize! = @calls << :authorize
+    def authorize! = (@calls << :authorize) && (@authorized = true)
+    def authorized? = @authorized
     def enable! = @calls << :enable
     def disable! = @calls << :disable
     def active? = @calls.last == :enable
+    def shutdown_helper = (@calls << :shutdown) && (@authorized = false)
+  end
+
+  # A sync that finishes at once (no Wi-Fi step), to run several in a row.
+  class QuickSync
+    def initialize(out:, on_transfer_end: nil, **) = (@out = out) && (@done = on_transfer_end)
+
+    def run
+      @out.puts "Transfer complete."
+      @done&.call(status: "SUCCESS")
+    end
+  end
+
+  def test_admin_password_asked_once_at_startup_for_the_whole_session
+    iso = RecordingIsolation.new
+    with_test_terminal(100, 30) do
+      capture_io do
+        app(FakeBackend.new, isolation_factory: ->(out:) { iso }).run(preauthorize: true, stop_when: ->(_) { true })
+      end
+    end
+    assert_equal %i[authorize shutdown], iso.calls # helper stops when the program does
+  end
+
+  def test_several_syncs_reuse_the_same_authorization
+    @config.setting_id = "s1"
+    iso = RecordingIsolation.new
+    sessions = []
+    stop = lambda do |a|
+      s = a.screen.is_a?(Merlin::TUI::Screens::SyncScreen) && a.screen.session
+      if s && s.finished? && !s.reporting? && !sessions.include?(s)
+        sessions << s
+        inject_keys(:esc, :end, :up, :enter, :enter) if sessions.size == 1 # back to menu, sync again
+      end
+      sessions.size == 2
+    end
+    with_test_terminal(100, 30) do
+      inject_keys(:end, :up, :enter, :enter)
+      app(FakeBackend.new, isolation_factory: ->(out:) { iso }, sync_factory: ->(**kw) { QuickSync.new(**kw) })
+        .run(stop_when: stop)
+    end
+    assert_equal 2, sessions.size
+    assert_equal %i[authorize shutdown], iso.calls # one prompt for both syncs
   end
 
   def test_sync_asks_for_admin_rights_once_and_filters_traffic
@@ -166,15 +211,14 @@ class TUITest < Minitest::Test
     stop = lambda do |a|
       sync_screen = a.screen if a.screen.is_a?(Merlin::TUI::Screens::SyncScreen)
       s = sync_screen&.session
-      inject_keys(:enter) if s&.wifi&.waiting && screen_text.include?("MERLIN_TUI") && !@joined && (@joined = true)
-      s&.finished? && !s.reporting?
+      s&.finished? && !s.reporting? # the Mac joins the speaker by itself
     end
     with_test_terminal(100, 30, timeout: 15) do
       inject_keys(:end, :up, :enter, :enter)
       app(backend, isolation_factory: ->(out:) { iso }, speaker_opts: { host: "127.0.0.1", port: speaker.port })
         .run(stop_when: stop)
     end
-    assert_equal %i[authorize enable disable], iso.calls
+    assert_equal %i[authorize enable disable shutdown], iso.calls
     assert_equal :done, sync_screen.session.state
   ensure
     speaker&.stop
@@ -308,156 +352,153 @@ class TUITest < Minitest::Test
     end
   end
 
-  class FakeSync
-    def initialize(out:, wifi:, on_transfer_end: nil)
-      @out = out
-      @wifi = wifi
-      @on_transfer_end = on_transfer_end
-    end
+class FakeSync
+  def initialize(out:, wifi:, on_transfer_end: nil)
+    @out = out
+    @wifi = wifi
+    @on_transfer_end = on_transfer_end
+  end
 
+  def run
+    @wifi.remember_home!
+    @out.puts "Synchro 42: 1 file(s) in plan"
+    @wifi.join_speaker("MERLIN-1234", "secret")
+    @out.print "\r  [audio 1/1] a.mp3 50%"
+    @out.print "\r  [audio 1/1] a.mp3 uploaded\n"
+    @out.puts "Transfer complete."
+    @on_transfer_end&.call(status: "SUCCESS")
+    @wifi.restore
+  end
+end
+
+# Full screen while the speaker's Wi-Fi is off; the Mac joins it by itself
+# once it appears, then goes back to the network it was on.
+def test_full_screen_prompt_until_the_speaker_appears
+  @config.setting_id = "s1"
+  net = FakeNetwork.new(speaker: "MERLIN-1234", speaker_appears_after: 10**9)
+  sync_screen = nil
+  prompt = nil
+  finished_frames = 0
+  stop = lambda do |a|
+    sync_screen = a.screen if a.screen.is_a?(Merlin::TUI::Screens::SyncScreen)
+    session = sync_screen&.session
+    if session&.wifi&.waiting && prompt.nil? && screen_text.include?("Looking for MERLIN-1234")
+      prompt = screen_text
+      net.speaker_appears_after = 0 # the user pressed the Wifi / Transfert button
+    end
+    finished_frames += 1 if session&.finished?
+    finished_frames > 1
+  end
+  with_test_terminal(100, 30) do
+    inject_keys(:end, :up, :enter, :enter) # Menu → Sync now → Start transfer
+    app(FakeBackend.new, network: net, sync_factory: ->(**kw) { FakeSync.new(**kw) }).run(stop_when: stop)
+    assert_includes screen_text, "a.mp3 uploaded"
+  end
+  assert_includes prompt, "Switch on the speaker's Wi-Fi"
+  assert_includes prompt, "2. Press its Wifi / Transfert button"
+  assert_includes prompt, "reconnects to Cohen when the transfer is over"
+  refute_includes prompt, "Transfer —", "the prompt takes the whole screen"
+  assert_equal [[:join, "MERLIN-1234", "secret"], [:forget, "MERLIN-1234"], [:join, "Cohen", nil]], net.calls
+  assert_equal "Cohen", net.ssid
+  assert_equal :done, sync_screen.session.state
+end
+
+# Goes offline while "on the speaker", then the user leaves the sync screen
+# before internet is back — this used to crash the TUI (Socket::ResolutionError).
+class OfflineSync
+  def initialize(out:, wifi:, backend:, on_transfer_end: nil)
+    @out = out
+    @wifi = wifi
+    @backend = backend
+    @on_transfer_end = on_transfer_end
+  end
+
+  def run
+    @wifi.join_speaker("MERLIN_TUI", "pw")
+    @backend.online = false
+    @out.puts "  [audio 1/1] a.mp3 uploaded"
+    @on_transfer_end&.call(status: "SUCCESS")
+    @wifi.restore # back on Cohen, but (in this test) no internet yet
+    @out.puts "Report saved for next sync."
+  end
+end
+
+def test_back_to_menu_while_offline_does_not_crash
+  @config.setting_id = "s1"
+  backend = FakeBackend.new
+  sync_screen = nil
+  left = false
+  stop = lambda do |a|
+    sync_screen = a.screen if a.screen.is_a?(Merlin::TUI::Screens::SyncScreen)
+    if sync_screen&.session&.finished? && !sync_screen.session.reporting? && !left
+      inject_keys(:esc) # back to the menu while still offline
+      left = true
+    end
+    a.screen.is_a?(Merlin::TUI::Screens::MainMenu) && left
+  end
+  with_test_terminal(100, 30) do
+    inject_keys(:end, :up, :enter, :enter)
+    app(backend, sync_factory: ->(**kw) { OfflineSync.new(**kw, backend: backend) }).run(stop_when: stop)
+    assert_includes screen_text, "can't reach api.hello-merlin.com"
+    assert_includes screen_text, "Sync now"
+  end
+  assert_includes sync_screen.session.log.lines, "Report saved for next sync."
+end
+
+# Real Merlin::Sync + fake speaker + fake Wi-Fi: remember the network after
+# talking to Merlin, join the speaker by itself, come back, report.
+def test_automatic_wifi_round_trip_with_the_real_sync
+  speaker = FakeSpeaker.new
+  @config.setting_id = "s1"
+  backend = FakeBackend.new
+  net = FakeNetwork.new(speaker: "MERLIN_TUI", speaker_appears_after: 2)
+  net.on_join = ->(ssid) { backend.online = !ssid.start_with?("MERLIN") } # no internet on the speaker's AP
+  sync_screen = nil
+  stop = lambda do |a|
+    sync_screen = a.screen if a.screen.is_a?(Merlin::TUI::Screens::SyncScreen)
+    s = sync_screen&.session
+    s&.finished? && !s.reporting?
+  end
+  with_test_terminal(100, 30, timeout: 15) do
+    inject_keys(:end, :up, :enter, :enter)
+    app(backend, network: net, speaker_opts: { host: "127.0.0.1", port: speaker.port }).run(stop_when: stop)
+  end
+  log = sync_screen.session.log.lines
+  assert_includes log, "Will reconnect to \"Cohen\" after the transfer."
+  assert_includes log, "Joined the speaker's Wi-Fi MERLIN_TUI."
+  assert_includes log, "Reconnecting to \"Cohen\"…"
+  assert_includes log, "Report sent to the Merlin backend."
+  assert_equal [[:join, "MERLIN_TUI", "pw"], [:forget, "MERLIN_TUI"], [:join, "Cohen", nil]], net.calls
+  assert_equal ["syn-tui", "SUCCESS"], [backend.reports.last[0], backend.reports.last[1][:status]]
+  assert_equal ["i.jpg", "a.mp3", "playlist-syn-tui.json"].sort, speaker.files.keys.sort
+ensure
+  speaker&.stop
+end
+
+# A failed transfer goes back to the remembered network too.
+def test_reconnects_home_after_a_failed_transfer
+  @config.setting_id = "s1"
+  net = FakeNetwork.new(speaker: "MERLIN-1234")
+  failing = Class.new(FakeSync) do
     def run
-      @out.puts "Synchro 42: 1 file(s) in plan"
+      @wifi.remember_home!
       @wifi.join_speaker("MERLIN-1234", "secret")
-      @out.print "\r  [audio 1/1] a.mp3 50%"
-      @out.print "\r  [audio 1/1] a.mp3 uploaded\n"
-      @out.puts "Transfer complete."
-      @on_transfer_end&.call(status: "SUCCESS")
+      @on_transfer_end&.call(status: "FAIL", status_code: "502_FAILED_ON_SDK_UPLOAD_FILE")
       @wifi.restore
+      raise Merlin::Error, "speaker refused"
     end
   end
-
-  def test_sync_waits_for_wifi_confirmation
-    @config.setting_id = "s1"
-    backend = FakeBackend.new
-    sync_screen = nil
-    confirmed = false
-    finished_frames = 0
-    stop = lambda do |a|
+  sync_screen = nil
+  with_test_terminal(100, 30) do
+    inject_keys(:end, :up, :enter, :enter)
+    app(FakeBackend.new, network: net, sync_factory: ->(**kw) { failing.new(**kw) }).run(stop_when: lambda { |a|
       sync_screen = a.screen if a.screen.is_a?(Merlin::TUI::Screens::SyncScreen)
-      session = sync_screen&.session
-      # Confirm only once the Wi-Fi banner has actually been painted.
-      if session&.wifi&.waiting && !confirmed && screen_text.include?("MERLIN-1234")
-        assert_includes screen_text, "password: secret"
-        inject_keys(:enter)
-        confirmed = true
-      end
-      # stop on the frame after completion so the final log is on screen
-      finished_frames += 1 if session&.finished?
-      finished_frames > 1
-    end
-    with_test_terminal(100, 30) do
-      # Menu → Sync now (2nd to last) → Start transfer
-      inject_keys(:end, :up, :enter, :enter)
-      app(backend, sync_factory: ->(**kw) { FakeSync.new(**kw) }).run(stop_when: stop)
-      app_text = screen_text
-      assert_includes app_text, "a.mp3 uploaded"
-      refute_includes app_text, "50%"
-    end
-    assert_equal :done, sync_screen.session.state
+      sync_screen&.session&.finished? && !sync_screen.session.reporting?
+    })
   end
-
-  # Goes offline while "on the speaker", then the user leaves the sync screen
-  # before reconnecting — this used to crash the TUI (Socket::ResolutionError).
-  class OfflineSync
-    def initialize(out:, wifi:, backend:, on_transfer_end: nil)
-      @out = out
-      @wifi = wifi
-      @backend = backend
-      @on_transfer_end = on_transfer_end
-    end
-
-    def run
-      @wifi.join_speaker("MERLIN_DKCRG8", "pw")
-      @backend.online = false
-      @out.puts "  [audio 1/1] a.mp3 uploaded"
-      @on_transfer_end&.call(status: "SUCCESS")
-      @out.puts(@wifi.restore == :skip ? "Report saved for next sync." : "Report sent.")
-    end
-  end
-
-  def test_back_to_menu_while_offline_does_not_crash
-    @config.setting_id = "s1"
-    backend = FakeBackend.new
-    sync_screen = nil
-    pressed = []
-    stop = lambda do |a|
-      sync_screen = a.screen if a.screen.is_a?(Merlin::TUI::Screens::SyncScreen)
-      wifi = sync_screen&.session&.wifi
-      if wifi&.waiting && !pressed.include?(:join) && screen_text.include?("MERLIN_DKCRG8")
-        inject_keys(:enter) && pressed << :join
-      elsif wifi&.reconnecting && !pressed.include?(:skip) && screen_text.include?("Back to your usual Wi-Fi")
-        inject_keys(:enter) && pressed << :skip # don't wait for internet
-      elsif sync_screen&.session&.finished? && pressed.include?(:skip) && !pressed.include?(:esc)
-        inject_keys(:esc) && pressed << :esc # back to the menu while still offline
-      end
-      a.screen.is_a?(Merlin::TUI::Screens::MainMenu) && pressed.include?(:esc)
-    end
-    with_test_terminal(100, 30) do
-      inject_keys(:end, :up, :enter, :enter)
-      app(backend, sync_factory: ->(**kw) { OfflineSync.new(**kw, backend: backend) })
-        .run(stop_when: stop)
-      assert_includes screen_text, "can't reach api.hello-merlin.com"
-      assert_includes screen_text, "Sync now"
-    end
-    assert_equal %i[join skip esc], pressed
-    sync_screen.session.join(2) # the report step runs on after the screen was left
-    assert_includes sync_screen.session.log.lines, "Report saved for next sync."
-  end
-
-  # Real Merlin::Sync against the fake speaker: the "back to your usual Wi-Fi"
-  # banner must only ever be painted once the transfer result is on screen.
-  def test_reconnect_banner_only_after_transfer_finished
-    speaker = FakeSpeaker.new
-    @config.setting_id = "s1"
-    backend = FakeBackend.new
-    sync_screen = nil
-    banner_frames = 0
-    frames_after_report = 0
-    violations = []
-    stop = lambda do |a|
-      sync_screen = a.screen if a.screen.is_a?(Merlin::TUI::Screens::SyncScreen)
-      session = sync_screen&.session
-      text = screen_text
-      if text.include?("Back to your usual Wi-Fi")
-        banner_frames += 1
-        unless session.finished? && !text.include?("Transfer — running") && text.include?("✔ Transfer complete") &&
-               text.include?("Transfer — done · reporting to Merlin")
-          violations << text
-        end
-        backend.online = true if banner_frames == 3 # the user is back on their usual Wi-Fi
-      end
-      if session&.wifi&.waiting && text.include?("MERLIN_TUI") && backend.online != false
-        backend.online = false # the Mac is now on the speaker's access point
-        inject_keys(:enter)
-      end
-      frames_after_report += 1 if session&.finished? && !session.reporting?
-      frames_after_report > 1
-    end
-    with_test_terminal(100, 30, timeout: 15) do
-      inject_keys(:end, :up, :enter, :enter)
-      app(backend, speaker_opts: { host: "127.0.0.1", port: speaker.port }).run(stop_when: stop)
-      refute_includes screen_text, "Back to your usual Wi-Fi", "banner must go away once online"
-    end
-    assert_empty violations, "reconnect banner shown while the sync was still underway:\n#{violations.first}"
-    assert_operator banner_frames, :>=, 3
-    assert_equal ["syn-tui", "SUCCESS"], [backend.reports.last[0], backend.reports.last[1][:status]]
-    assert_includes sync_screen.session.log.lines, "Report sent to the Merlin backend."
-    assert_equal ["i.jpg", "a.mp3", "playlist-syn-tui.json"].sort, speaker.files.keys.sort
-  ensure
-    speaker&.stop
-  end
-
-  def test_reconnect_banner_clears_by_itself_once_online
-    online_after = Time.now + 0.1
-    wifi = Merlin::TUI::TuiWifi.new(auto: false, log: Merlin::TUI::SyncLog.new, online: -> { Time.now > online_after })
-    seen = nil
-    t = Thread.new { wifi.restore }
-    sleep 0.1
-    seen = wifi.reconnecting
-    assert_equal :online, t.value
-    assert seen
-    refute wifi.reconnecting
-  end
+  assert_equal :failed, sync_screen.session.state
+  assert_equal [:join, "Cohen", nil], net.calls.last
+end
 
   def test_sync_log_handles_carriage_returns
     log = Merlin::TUI::SyncLog.new

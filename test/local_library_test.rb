@@ -12,7 +12,12 @@ class LocalLibraryTest < Minitest::Test
                                               sample_rate: 48_000, channels: 2, bit_rate: 256_000, has_cover: false)
     def prepare_audio(_src, dest, _info) = File.write(dest, "MP3") && :transcoded
     def prepare_cover(_src, dest, _info) = File.write(dest, "JPG") && :default
-    def default_cover(dest) = FileUtils.mkdir_p(File.dirname(dest)) && File.write(dest, "JPG")
+    def folder_cover(title, dest)
+      (@drawn ||= []) << title
+      File.write(dest, "cover titled #{title}") && :titled
+    end
+
+    def drawn = (@drawn ||= [])
   end
 
   # Shape of the real playlistText (Verte, 2026-10-02): sections -> folders -> tracks.
@@ -77,6 +82,31 @@ class LocalLibraryTest < Minitest::Test
       assert_includes p["fileList"].map { _1["filename"] }, "#{fallback['uuid']}.jpg"
     end
     assert_equal 1, @uuids.uniq.size
+  end
+
+  # The speaker shows covers, not folder names: folder covers carry the name.
+  def test_folder_covers_show_the_folder_name
+    f = @lib.add_folder("Comptines de mamie", parent: "sec-mus")
+    assert_equal "cover titled Comptines de mamie", File.read(@lib.cover_path(f.uuid))
+    @lib.rename(f.uuid, "Comptines de papi")
+    assert_equal "cover titled Comptines de papi", File.read(@lib.cover_path(f.uuid))
+
+    FakeMedia.drawn.clear
+    @lib.merge!(plan)
+    assert_empty FakeMedia.drawn, "up-to-date covers are not redrawn at each sync"
+
+    File.delete(@lib.cover_path(f.uuid)) # e.g. a folder from before titled covers
+    @lib.merge!(plan)
+    assert_equal ["Comptines de papi"], FakeMedia.drawn
+  end
+
+  def test_fallback_folder_cover_is_titled_too
+    t, = @lib.import(source("x.mp3"), parent: "gone")
+    p = plan
+    @lib.merge!(p)
+    fallback = JSON.parse(p["playlistText"])[0]["child"].last
+    assert_equal "cover titled Mes fichiers", File.read(@lib.cover_path(fallback["uuid"]))
+    assert_equal [t.uuid], fallback["child"].map { _1["uuid"] }
   end
 
   def test_titles_are_shortened_like_the_server_does

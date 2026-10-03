@@ -21,6 +21,9 @@ module Merlin
     def cache_dir = File.join(home, "cache")
     def log_dir = File.join(home, "logs")
 
+    # This Mac's Wi-Fi (network name + scans via the Merlin Wi-Fi helper app).
+    def network = MacNetwork.new(helper: WifiHelper.new(dir: home))
+
     # Audio imported from this Mac for the selected speaker.
     def library(setting_id = self.setting_id) = LocalLibrary.new(dir: File.join(home, "library"), setting_id: setting_id)
 

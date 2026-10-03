@@ -48,6 +48,8 @@ module Merlin
       plan = @backend.create_synchro(type: type)
       id = plan.fetch("id")
       save_json("last_synchro.json", plan)
+      # Merlin answered, so this is a network with internet: the one to come back to.
+      @wifi.remember_home! if @wifi.respond_to?(:remember_home!)
       say "Synchro #{id}: #{plan.fetch('fileList', []).size} file(s) in plan"
 
       return merge_library(plan) && prepare_files(plan) && write_playlist(plan) && plan if @dry_run

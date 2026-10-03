@@ -3,6 +3,8 @@
 require "open3"
 require "json"
 require "fileutils"
+require "tempfile"
+require "zlib"
 
 module Merlin
   # Turns arbitrary audio files into what the speaker plays, using ffmpeg.
@@ -79,6 +81,39 @@ module Merlin
       end
       default_cover(dest)
       :default
+    end
+
+    # The speaker doesn't show folder names, only covers: render the name on
+    # a colored square (ImageMagick's caption: picks the biggest font that
+    # fits). Colors come from the name, so folders look distinct but stable.
+    FOLDER_COLORS = %w[#E4572E #2E86AB #8E44AD #27AE60 #D35400 #C0392B #16A085 #34495E].freeze
+    FOLDER_FONTS = ["/System/Library/Fonts/Supplemental/Arial Rounded Bold.ttf",
+                    "/System/Library/Fonts/Supplemental/Arial Bold.ttf"].freeze
+
+    def imagemagick? = system("magick", "-version", out: File::NULL, err: File::NULL)
+
+    # Returns :titled, or :default when ImageMagick isn't installed.
+    def folder_cover(title, dest)
+      unless imagemagick?
+        default_cover(dest)
+        return :default
+      end
+
+      FileUtils.mkdir_p(File.dirname(dest))
+      color = FOLDER_COLORS[Zlib.crc32(title) % FOLDER_COLORS.size]
+      font = FOLDER_FONTS.find { File.exist?(_1) }
+      inner = COVER_SIZE - 16
+      Tempfile.create(["merlin-title", ".txt"]) do |text|
+        text.write(title)
+        text.flush
+        # caption:@file: the text is read verbatim (no '@'/'%' interpretation).
+        args = ["magick", "-size", "#{inner}x#{inner}", "-background", color, "-fill", "white",
+                *(font ? ["-font", font] : []), "-gravity", "center", "caption:@#{text.path}",
+                "-extent", "#{COVER_SIZE}x#{COVER_SIZE}", "-quality", "90", dest]
+        out, status = Open3.capture2e(*args)
+        raise Error, "cover for #{title.inspect} failed: #{out.strip.lines.last}" unless status.success?
+      end
+      :titled
     end
 
     def default_cover(dest)

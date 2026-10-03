@@ -46,7 +46,8 @@ module Merlin
     def add_folder(title, parent:)
       entry = Entry.new(uuid: SecureRandom.uuid, kind: "folder", title: self.class.speaker_title(title),
                         parent: parent, added_at: Time.now.to_i, duration: nil, source: nil)
-      @media.default_cover(cover_path(entry.uuid))
+      FileUtils.mkdir_p(files_dir)
+      draw_folder_cover(entry.uuid, entry.title)
       @entries << entry
       save
       entry
@@ -72,7 +73,9 @@ module Merlin
     end
 
     def rename(uuid, title)
-      replace(uuid) { _1.with(title: self.class.speaker_title(title)) }
+      entry = replace(uuid) { _1.with(title: self.class.speaker_title(title)) }
+      draw_folder_cover(entry.uuid, entry.title) if entry.folder? # the name is in the artwork
+      entry
     end
 
     def move(uuid, parent)
@@ -84,6 +87,7 @@ module Merlin
       doomed = [uuid] + children(uuid).map(&:uuid)
       doomed.each { |u| FileUtils.rm_f([audio_path(u), cover_path(u)]) }
       @entries.reject! { doomed.include?(_1.uuid) }
+      doomed.each { cover_titles.delete(_1) }
       save
     end
 
@@ -94,6 +98,8 @@ module Merlin
     def merge!(plan)
       return { tracks: 0, folders: 0, relocated: [] } if empty?
 
+      # Folders created before titled covers existed (or whose cover is gone).
+      folders.each { |f| draw_folder_cover(f.uuid, f.title) unless cover_current?(f.uuid, f.title) }
       tree = JSON.parse(plan.fetch("playlistText"))
       containers = {}
       index = lambda do |nodes|
@@ -162,6 +168,18 @@ module Merlin
 
     def files_dir = File.join(dir, "files")
 
+    # The speaker doesn't display folder names, so folder covers carry them.
+    # Remember which title each cover was drawn for, to redraw on rename.
+    def cover_titles = (@meta["cover_titles"] ||= {})
+    def cover_current?(uuid, title) = cover_titles[uuid] == title && File.exist?(cover_path(uuid))
+
+    def draw_folder_cover(uuid, title)
+      FileUtils.mkdir_p(files_dir)
+      @media.folder_cover(title, cover_path(uuid))
+      cover_titles[uuid] = title
+      save
+    end
+
     def file_entry(entry, type)
       path = type == "audio" ? audio_path(entry.uuid) : cover_path(entry.uuid)
       { "type" => type, "filename" => File.basename(path), "title" => entry.title, "path" => path }
@@ -174,7 +192,7 @@ module Merlin
       end
       uuid = @meta["fallback_uuid"]
       containers[uuid] ||= begin
-        @media.default_cover(cover_path(uuid)) unless File.exist?(cover_path(uuid))
+        draw_folder_cover(uuid, FALLBACK_FOLDER) unless cover_current?(uuid, FALLBACK_FOLDER)
         node = { "uuid" => uuid, "title" => FALLBACK_FOLDER, "child" => [] }
         section["child"] << node
         files << { "type" => "image", "filename" => "#{uuid}.jpg", "title" => FALLBACK_FOLDER, "path" => cover_path(uuid) }

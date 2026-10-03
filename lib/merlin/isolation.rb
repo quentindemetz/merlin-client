@@ -22,7 +22,8 @@ module Merlin
   # Admin rights: sudo may be configured never to cache credentials
   # (`Defaults timestamp_timeout=0`, common on managed Macs), so instead of
   # several sudo calls we start one small root helper (one password prompt)
-  # that stays alive for the sync and only knows "on" and "off".
+  # that only knows "on" and "off" and lives as long as the program: syncs
+  # reuse it. It exits on shutdown_helper, or by itself when we go away (EOF).
   class Isolation
     ANCHOR = "com.apple/merlin"
     REPLY_TIMEOUT = 15
@@ -69,6 +70,8 @@ module Merlin
       PF
     end
 
+    attr_writer :out # where status lines go (the TUI points it at each sync's log)
+
     def active? = !@token.nil?
     def leftover? = File.exist?(@state_path)
     def authorized? = !@helper.nil? && @wait&.alive?
@@ -99,19 +102,16 @@ module Merlin
       File.write(@state_path, JSON.generate(token: @token, interface: interface))
       @out.puts "Traffic filter on: only the transfer can reach the speaker."
       true
-    rescue Error
-      shutdown_helper
-      raise
     end
 
-    def disable!(keep_session: false)
+    # Turns the filter off; the helper stays up for the next sync (the program
+    # calls shutdown_helper when it exits).
+    def disable!
       call("off #{@token}")
       @token = nil
       FileUtils.rm_f(@state_path)
       @out.puts "Traffic filter off."
       true
-    ensure
-      shutdown_helper unless keep_session
     end
 
     # A previous run that died left rules/pf enabled: clean them up.
@@ -120,7 +120,7 @@ module Merlin
 
       state = JSON.parse(File.read(@state_path)) rescue {}
       @token = state["token"]
-      disable!(keep_session: true)
+      disable!
     end
 
     def shutdown_helper

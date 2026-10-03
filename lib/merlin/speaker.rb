@@ -162,7 +162,13 @@ module Merlin
 
     # Returns { found:, sha256: (hex or nil) }. With verify: true the speaker
     # hashes the file so it can be compared with a local copy.
-    def search_file(filename, verify: true, timeout: 5)
+    # With verify, the speaker reads and hashes the whole file before replying
+    # (measured ~1.6 MB/s): allow 1 s per MB of the expected size on top of the
+    # usual command timeout, or an 8.6 MB MP3 never gets an answer in time.
+    VERIFY_BYTES_PER_SECOND = 1_000_000
+
+    def search_file(filename, verify: true, size: 0, timeout: nil)
+      timeout ||= @ack_timeout + (verify ? size.to_f / VERIFY_BYTES_PER_SECOND : 0)
       frame = request(Cmd::SEARCH_FILE, [verify ? 1 : 0].pack("C") + filename.b, timeout: timeout)
       p = frame.payload
       case p.getbyte(0)
@@ -217,7 +223,7 @@ module Merlin
 
     # Upload unless an identical file is already there (what the app does).
     def sync_file(filename, data, &progress)
-      remote = search_file(filename, verify: true)
+      remote = search_file(filename, verify: true, size: data.bytesize)
       local = Digest::SHA256.hexdigest(data)
       same_size = remote[:size].nil? || remote[:size] == data.bytesize
       return :already_present if remote[:found] && remote[:sha256] == local && same_size

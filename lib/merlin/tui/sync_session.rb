@@ -34,54 +34,27 @@ module Merlin
       end
     end
 
-    # Stands in for Merlin::Wifi inside the TUI: instead of reading stdin it
-    # waits until the user confirms on the sync screen.
+    # Wifi for the TUI: same automatic switching, plus what the sync screen
+    # needs to show its full-screen "switch the speaker on" prompt.
     class TuiWifi
-      # waiting: speaker AP details while we wait for the user to join it.
-      # reconnecting: true while we wait for the user to get back online.
-      attr_reader :waiting, :reconnecting
+      # waiting: { ssid:, status: } while looking for the speaker's network.
+      attr_reader :waiting
 
-      # How often to check whether the Merlin API is reachable again (tests: tiny).
-      class << self
-        attr_writer :poll_interval
-
-        def poll_interval = @poll_interval || 3
+      def initialize(network:, log:)
+        @wifi = Wifi.new(network: network, out: log, on_status: ->(msg) { @waiting = @waiting&.merge(status: msg) })
       end
 
-      def initialize(auto:, log:, online: -> { true })
-        @queue = Queue.new
-        @online = online
-        @real = Wifi.new(auto: true, out: log) if auto
-      end
+      def remember_home! = @wifi.remember_home!
+      def home_ssid = @wifi.home_ssid
+      def rejoin_speaker = @wifi.rejoin_speaker
+      def restore = @wifi.restore
 
       def join_speaker(ssid, password)
-        return @real.join_speaker(ssid, password) if @real
-
-        @waiting = { ssid: ssid, password: password }
-        @queue.pop
+        @waiting = { ssid: ssid, status: Wifi::ASK }
+        @wifi.join_speaker(ssid, password)
       ensure
         @waiting = nil
       end
-
-      # Returns once the Merlin API is reachable again (polled), or when the
-      # user presses Enter.
-      def restore
-        return @real.restore if @real
-
-        @reconnecting = true
-        until @online.call
-          return :skip if @queue.pop(timeout: self.class.poll_interval)
-        end
-        :online
-      ensure
-        @reconnecting = false
-      end
-
-      def confirm
-        @queue << true if @waiting || @reconnecting
-      end
-
-      def rejoin_speaker = @real&.rejoin_speaker
     end
 
     # One synchronisation running in a background thread.
@@ -94,10 +67,11 @@ module Merlin
 
       attr_reader :isolation
 
-      def initialize(app, auto_wifi:, isolate: true)
+      def initialize(app, isolate: true)
         @log = SyncLog.new
-        @wifi = TuiWifi.new(auto: auto_wifi, log: @log, online: -> { app.backend.reachable? })
-        @isolation = app.new_isolation(out: @log) if isolate
+        @wifi = TuiWifi.new(network: app.network, log: @log)
+        @isolation = app.isolation if isolate # shared for the whole session (one password)
+        @isolation&.out = @log
         opts = { out: @log, wifi: @wifi, on_transfer_end: ->(report) { @state = outcome(report) } }
         opts[:isolation] = @isolation if @isolation
         @sync = app.new_sync(**opts)
@@ -127,13 +101,10 @@ module Merlin
       def abort! = @thread&.raise(Interrupt)
       def join(timeout = nil) = @thread&.join(timeout)
 
-      # Leaving the app: stop waiting for internet (the report is then saved
-      # and sent at the next sync) and let the thread finish.
+      # Leaving the app: let a sync that is reconnecting / reporting finish
+      # (bounded: Wi-Fi restore and the internet wait are both time-limited).
       def shutdown
-        return unless @thread&.alive?
-
-        @wifi.confirm
-        @thread.join(15)
+        @thread&.join(60)
       end
 
       private
@@ -149,7 +120,6 @@ module Merlin
       class SyncScreen < ListScreen
         def initialize(app)
           super
-          @auto_wifi = false
           @isolate = true
         end
 
@@ -160,9 +130,7 @@ module Merlin
 
         def hints
           return [%w[↑↓ move], %w[enter select], %w[esc back]] unless @session
-          return [["enter", "don't wait (report sent at next sync)"], %w[esc back]] if reconnect_banner?
           return [%w[esc back]] if @session.finished?
-          return [["enter", "I'm on the speaker Wi-Fi"], %w[ctrl-c abort]] if @session.wifi.waiting
 
           [%w[ctrl-c abort]]
         end
@@ -171,14 +139,13 @@ module Merlin
           speaker = app.current_speaker&.dig("speaker_name") || "your speaker"
           [
             "Transfer the basket#{" (#{app.basket_count} pending)" if app.basket_count} and your account's content to #{speaker}.",
-            "Files are downloaded first while you're online; then you'll join the speaker's Wi-Fi " \
-            "(switch it on and press its Wifi / Transfert button)."
+            "Files are downloaded first while you're online. Then you'll be asked to switch the speaker's " \
+            "Wi-Fi on: this Mac joins it by itself, and reconnects to your usual network at the end."
           ]
         end
 
         def build_rows
           [Row.item("Start transfer", :start),
-           Row.item("Switch Wi-Fi automatically (macOS networksetup): #{@auto_wifi ? 'ON' : 'off'}", :auto),
            Row.item("Block this Mac's other traffic (admin password): " \
                     "#{@isolate ? 'ON' : 'off (speaker may crash)'}", :isolate)]
         end
@@ -186,29 +153,22 @@ module Merlin
         def handle(event)
           return super unless @session
 
-          if reconnect_banner? && event == :enter
-            @session.wifi.confirm # stop waiting for internet
-          elsif @session.finished?
+          if @session.finished?
             # Leaving is fine: a pending report keeps going in the background.
             app.pop if %i[esc left enter backspace].include?(event.to_sym)
           elsif event == :ctrl_c || event == :esc
             @session.abort!
             app.notify("Aborting…")
-          elsif event == :enter
-            @session.wifi.confirm
           end
         end
 
         def activate(row)
           case row.value
-          when :auto
-            @auto_wifi = !@auto_wifi
-            @rows = nil
           when :isolate
             @isolate = !@isolate
             @rows = nil
           when :start
-            session = SyncSession.new(app, auto_wifi: @auto_wifi, isolate: @isolate)
+            session = SyncSession.new(app, isolate: @isolate)
             return unless authorize(session)
 
             @session = session.start
@@ -219,14 +179,9 @@ module Merlin
         def render(frame, area)
           return super unless @session
 
+          return render_speaker_prompt(frame, area, @session.wifi.waiting) if @session.wifi.waiting
+
           log_area = area
-          if (title, text = banner)
-            box, log_area = tui.layout_split(area, direction: :vertical,
-                                                   constraints: [tui.constraint_length(6), tui.constraint_fill(1)])
-            frame.render_widget(tui.paragraph(text: text.join("\n"), style: app.style(fg: :yellow),
-                                              block: tui.block(title: " #{title} ", borders: [:all],
-                                                               border_style: app.style(fg: :yellow))), box)
-          end
           lines = @session.log.lines
           lines += ["", result_line] if @session.finished?
           visible = [log_area.height - 2, 1].max
@@ -241,6 +196,7 @@ module Merlin
         # the full-screen UI for it (once, before downloads start).
         def authorize(session)
           return true unless session.isolation
+          return true if session.isolation.authorized? # granted at startup or by an earlier sync
 
           app.suspend do
             puts "\nThe speaker crashes when this Mac's other traffic reaches it, so a temporary"
@@ -253,28 +209,30 @@ module Merlin
           false
         end
 
-        # Only once the transfer has finished (its result is on screen), never
-        # while the sync is still underway.
-        def reconnect_banner? = @session&.finished? && @session.wifi.reconnecting
-
         def state_label
           @session.reporting? ? "#{@session.state} · reporting to Merlin" : @session.state.to_s
         end
 
-        def banner
-          if (w = @session.wifi.waiting)
-            ["Join the speaker Wi-Fi",
-             ["Switch the speaker on and press its Wifi / Transfert button,",
-              "then join its Wi-Fi network: #{w[:ssid] || 'MERLIN…'}#{"   password: #{w[:password]}" if w[:password]}",
-              "", "Press Enter once your laptop is connected."]]
-          elsif reconnect_banner?
-            ["Back to your usual Wi-Fi",
-             ["Done with the speaker. Reconnect this Mac to your usual Wi-Fi network.",
-              "The report is sent to Merlin automatically as soon as it's reachable.",
-              "", "Press Enter to stop waiting (the report will then be sent at the next sync)."]]
-          end
+        # Full screen while waiting for the speaker's network: the one thing the
+        # user has to do. The Mac joins by itself as soon as the network appears.
+        def render_speaker_prompt(frame, area, waiting)
+          text = [
+            tui.line(spans: [tui.span(content: "Switch on the speaker's Wi-Fi", style: app.style(fg: :yellow, modifiers: [:bold]))], alignment: :center),
+            tui.line(spans: []),
+            tui.line(spans: [tui.span(content: "1. Switch the speaker on")], alignment: :center),
+            tui.line(spans: [tui.span(content: "2. Press its Wifi / Transfert button")], alignment: :center),
+            tui.line(spans: []),
+            tui.line(spans: [tui.span(content: "This Mac joins #{waiting[:ssid]} by itself as soon as it appears,", style: app.style(fg: :gray))], alignment: :center),
+            tui.line(spans: [tui.span(content: "and reconnects to #{@session.wifi.home_ssid || 'your usual network'} when the transfer is over.", style: app.style(fg: :gray))], alignment: :center),
+            tui.line(spans: []),
+            tui.line(spans: [tui.span(content: "⏳ #{waiting[:status]}", style: app.style(fg: :cyan))], alignment: :center)
+          ]
+          _, box, = tui.layout_split(area, direction: :vertical,
+                                           constraints: [tui.constraint_fill(1), tui.constraint_length(text.size + 2), tui.constraint_fill(1)])
+          frame.render_widget(tui.paragraph(text: text, wrap: true,
+                                            block: tui.block(borders: [:all], border_style: app.style(fg: :yellow))), box)
         end
-
+        
         def result_line
           case @session.state
           when :done then "✔ Transfer complete. Press Esc to go back."

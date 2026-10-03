@@ -43,20 +43,23 @@ class IsolationTest < Minitest::Test
     PF
   end
 
-  # One authorization (one sudo prompt) serves the whole sync: on, then off.
-  def test_one_helper_turns_the_filter_on_and_off
+  # One authorization (one sudo prompt) serves every sync of the session.
+  def test_one_helper_serves_several_syncs_until_shutdown
     @iso.authorize!
-    @iso.enable!
-    assert @iso.active?
-    assert_equal ["-a com.apple/merlin -f -", "-E"], calls
-    assert_equal @iso.rules, File.read("#{@log}.rules")
-    assert_equal "1234567890", JSON.parse(File.read(File.join(@dir, "isolation.json")))["token"]
+    2.times do
+      @iso.enable!
+      assert @iso.active?
+      assert_equal "1234567890", JSON.parse(File.read(File.join(@dir, "isolation.json")))["token"]
+      @iso.disable!
+      refute @iso.active?
+      refute @iso.leftover?
+      assert @iso.authorized?, "the helper stays up for the next sync"
+    end
+    assert_equal ["-a com.apple/merlin -f -", "-E", "-a com.apple/merlin -F all", "-X 1234567890"] * 2, calls
+    assert_equal @iso.rules * 2, File.read("#{@log}.rules")
 
-    @iso.disable!
-    refute @iso.active?
-    refute @iso.leftover?
-    refute @iso.authorized?, "the helper exits once the filter is off"
-    assert_equal ["-a com.apple/merlin -F all", "-X 1234567890"], calls.last(2)
+    @iso.shutdown_helper
+    refute @iso.authorized?
   end
 
   def test_leftover_from_a_crashed_run_is_cleaned_before_enabling
@@ -66,12 +69,14 @@ class IsolationTest < Minitest::Test
     assert_equal ["-a com.apple/merlin -F all", "-X 42", "-a com.apple/merlin -f -", "-E"], calls
   end
 
-  def test_pfctl_failure_is_reported_and_the_helper_stops
+  def test_pfctl_failure_is_reported_and_the_helper_stays_usable
     File.write(File.join(@dir, "fail_E"), "")
     @iso.authorize!
     err = assert_raises(Merlin::Error) { @iso.enable! }
     assert_match(/pfctl on failed: pfctl: permission denied/, err.message)
-    refute @iso.authorized?
+    assert @iso.authorized?
+    File.delete(File.join(@dir, "fail_E"))
+    assert @iso.enable!, "a later sync can still use the same helper"
   end
 
   def test_nothing_runs_without_authorization

@@ -1,95 +1,138 @@
 # frozen_string_literal: true
 
-require "open3"
-
 module Merlin
-  # Getting onto the speaker's access point. Manual mode just tells the user
-  # what to join; auto mode drives macOS `networksetup`.
+  # Switching this Mac between its usual Wi-Fi and the speaker's access point:
+  #
+  # 1. remember_home!  — right after talking to the Merlin API, note the
+  #                      network we're on (needs Location Services, see
+  #                      WifiHelper).
+  # 2. join_speaker    — wait for the speaker's network to appear (the user
+  #                      switches the speaker on and presses Wifi / Transfert)
+  #                      and join it automatically.
+  # 3. restore         — whatever the outcome, forget the speaker network and
+  #                      reconnect to the remembered one.
   class Wifi
-    def initialize(auto: false, interface: nil, home_ssid: nil, input: $stdin, out: $stdout)
-      @auto = auto
-      @interface = interface
-      @home_ssid = home_ssid
-      @input = input
-      @out = out
+    SPEAKER_SUBNET = "192.168.4."
+    ASK = "Switch the speaker on and press its Wifi / Transfert button"
+
+    attr_reader :home_ssid, :status
+
+    # Seconds between scans, to wait for a join to take, and before giving up
+    # on the speaker's network. Overridable (tests use tiny values).
+    TIMING = { poll: 3, join_wait: 20, give_up: 600 }.freeze
+
+    class << self
+      attr_writer :timing
+
+      def timing = TIMING.merge(@timing || {})
     end
 
-    # After a lost link: macOS tends to drop the speaker's internet-less AP.
-    # Rejoin it, but only if we're actually off its 192.168.4.x subnet.
-    def rejoin_speaker
-      return unless @auto && @speaker_ssid
-      return if `ipconfig getifaddr #{interface} 2>/dev/null`.start_with?("192.168.4.")
+    # on_status: ->(message) for the UI's "waiting for the speaker" screen.
+    def initialize(network: MacNetwork.new, out: $stdout, on_status: nil, **timing)
+      @network = network
+      @out = out
+      @on_status = on_status
+      t = self.class.timing.merge(timing)
+      @poll = t[:poll]
+      @join_wait = t[:join_wait]
+      @give_up = t[:give_up]
+    end
 
-      @out.puts "Rejoining speaker Wi-Fi #{@speaker_ssid.inspect}..."
-      run!("networksetup", "-setairportnetwork", interface, @speaker_ssid, *@speaker_password)
+    def remember_home!
+      ssid = @network.current_ssid
+      if ssid && !ssid.match?(/\AMERLIN/i)
+        @home_ssid = ssid
+        say "Will reconnect to #{ssid.inspect} after the transfer."
+      else
+        say "Couldn't read this Mac's Wi-Fi name (Location Services for \"Merlin Wi-Fi\"?): " \
+            "macOS will pick the network back after the transfer."
+      end
     rescue Error => e
-      @out.puts "Could not rejoin #{@speaker_ssid}: #{e.message}"
+      say "Couldn't read this Mac's Wi-Fi name (#{e.message})."
     end
 
     def join_speaker(ssid, password)
       @speaker_ssid = ssid
       @speaker_password = password
-      if @auto && ssid
-        @home_ssid ||= current_ssid
-        @out.puts "Joining speaker Wi-Fi #{ssid.inspect} on #{interface}..."
-        run!("networksetup", "-setairportnetwork", interface, ssid, *password)
-      else
-        @out.puts
-        @out.puts "Turn the speaker on and press its Wifi / Transfert button, then join its Wi-Fi network"
-        @out.puts ssid ? "  SSID: #{ssid}#{"   password: #{password}" if password}" : "  (named MERLIN...)"
-        @out.print "Press Enter once your laptop is connected to the speaker... "
-        @input.gets
+      deadline = Time.now + @give_up
+      say "#{ASK}: this Mac joins #{ssid} by itself as soon as it appears." unless on_speaker?
+      update_status("Looking for #{ssid}…")
+      until on_speaker?
+        raise Error, "the speaker's Wi-Fi #{ssid} didn't show up within #{@give_up / 60} minutes" if Time.now > deadline
+
+        nets = scan
+        if nets.nil? || nets.include?(ssid) # can't scan (no permission): just try
+          update_status("Found #{ssid}, joining…") if nets
+          try_join
+        else
+          update_status("Looking for #{ssid}…")
+          pause(@poll)
+        end
       end
+      update_status("Connected to #{ssid}")
+      say "Joined the speaker's Wi-Fi #{ssid}."
     end
 
-    # Get back onto a network with internet access (the caller then waits for
-    # the Merlin API to be reachable before reporting).
-    def restore
-      return manual_restore unless @auto
+    # After a dropped link during the transfer: rejoin if we've left it.
+    def rejoin_speaker
+      return if on_speaker? || @speaker_ssid.nil?
 
-      # Forget the speaker AP so macOS doesn't auto-join it again.
-      Open3.capture2e("networksetup", "-removepreferredwirelessnetwork", interface, @speaker_ssid) if @speaker_ssid
+      say "Rejoining the speaker's Wi-Fi #{@speaker_ssid}…"
+      try_join
+    end
+
+    def restore
+      @network.forget(@speaker_ssid) if @speaker_ssid
       if @home_ssid
-        @out.puts "Rejoining #{@home_ssid.inspect}..."
-        run!("networksetup", "-setairportnetwork", interface, @home_ssid)
+        say "Reconnecting to #{@home_ssid.inspect}…"
+        begin
+          @network.join(@home_ssid)
+        rescue Error => e
+          say "Couldn't join #{@home_ssid.inspect} (#{e.message}); letting macOS reconnect."
+          @network.power_cycle
+        end
       else
-        # macOS redacts the current SSID without Location access: cycling
-        # Wi-Fi makes it auto-join the preferred (home) network instead.
-        @out.puts "Reconnecting Wi-Fi to your usual network..."
-        run!("networksetup", "-setairportpower", interface, "off")
-        sleep 3
-        run!("networksetup", "-setairportpower", interface, "on")
+        say "Reconnecting Wi-Fi to your usual network…"
+        @network.power_cycle
       end
+      wait_off_speaker
     rescue Error => e
-      @out.puts "Could not reconnect automatically: #{e.message} (reconnect manually)"
+      say "Could not reconnect automatically: #{e.message} (reconnect manually)"
     end
 
     private
 
-    def manual_restore
-      @out.puts
-      @out.print "Transfer finished with the speaker. Reconnect this Mac to your usual Wi-Fi, then press Enter... "
-      @input.gets
+    def on_speaker? = @network.ip.to_s.start_with?(SPEAKER_SUBNET)
+
+    # nil when scanning isn't possible (no location permission → no names).
+    def scan
+      nets = @network.visible_ssids
+      nets.empty? ? nil : nets
+    rescue Error
+      nil
     end
 
-    def interface
-      @interface ||= begin
-        out, = Open3.capture2("networksetup", "-listallhardwareports")
-        out[/Hardware Port: (?:Wi-Fi|AirPort)\nDevice: (\S+)/, 1] || "en0"
-      end
+    def try_join
+      @network.join(@speaker_ssid, @speaker_password)
+      deadline = Time.now + @join_wait
+      pause(1) until on_speaker? || Time.now > deadline
+    rescue Error
+      pause(@poll) # not there yet
     end
 
-    def current_ssid
-      out, = Open3.capture2("networksetup", "-getairportnetwork", interface)
-      out[/Current Wi-Fi Network: (.+)$/, 1]
+    def wait_off_speaker
+      deadline = Time.now + @join_wait
+      pause(1) while on_speaker? && Time.now < deadline
     end
 
-    def run!(*cmd)
-      out, status = Open3.capture2e(*cmd)
-      # networksetup exits 0 even on failure but prints an error.
-      raise Error, out.strip if !status.success? || out =~ /error|could not|failed/i
+    def update_status(msg)
+      return if msg == @status
 
-      out
+      @status = msg
+      @on_status&.call(msg)
     end
+
+    def pause(seconds) = sleep(seconds)
+    def say(msg) = @out.puts(msg)
   end
 end
