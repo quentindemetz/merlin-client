@@ -17,11 +17,23 @@ bin/merlin                            # full-screen terminal UI (same as `bin/me
 * **Log in / Log out.** After login, a single speaker is selected automatically. With several, you get a picker.
 * **Speaker.** Pick which speaker the next actions apply to.
 * **On my speaker.** The speaker's content tree. `space` marks items and `d` queues the marked ones (or the current one) for removal. `c` jumps to the catalog.
+* **My audio files.** Import audio from this Mac into any folder of the speaker, or into a new folder; see below.
 * **Browse / Search the catalog.** `enter` opens categories, collections and contents. `a` adds the marked episodes, or the collection under the cursor. Inside a collection, `A` adds every episode.
 * **Basket.** Pending adds and removals. `x` cancels the marked ones, `s` starts a sync.
 * **Sync now.** Runs the full transfer in the background with a live log. When it's time, a banner shows the speaker's Wi-Fi name and password; join it and press `enter`. You can switch on automatic Wi-Fi switching (macOS `networksetup`) before starting. When you start, the TUI briefly hands the terminal to `sudo` for your admin password; that's for the traffic filter described below, on by default. `ctrl-c` aborts, and the abort is reported to Merlin.
 
   Nothing talks to the Merlin API while you're on the speaker's Wi-Fi. After the transfer, a second banner asks you to rejoin your usual network. The report is sent as soon as Merlin is reachable again. If you skip the wait with `enter`, the report is saved and sent at the next sync.
+
+### Your own audio files
+
+In the TUI, **My audio files** imports audio from this Mac. Press `i` and type or drag-and-drop paths; files and whole folders both work. Then choose where the files go: an existing folder on the speaker, or **➕ New folder in <section>** (Histoires, Musique, Documentaires…). `n` creates an empty folder, `r` renames, and `x` removes.
+
+* **Transcoding (needs `ffmpeg`, `brew install ffmpeg`):** the speaker plays MP3 at 44.1 kHz, either mono 64 kbps or stereo 128 kbps. MP3s already at 44.1 kHz and up to 192 kbps are copied untouched. Everything else is converted, mono to 64 kbps and stereo to 128 kbps.
+* **Covers:** each track gets a 128×128 JPEG cover, taken from the file's artwork or a plain default.
+* **Titles:** they come from the file's title tag, or the file name, and are shortened to the speaker's limit like the server does (60 bytes + "...").
+* **Sync:** files are stored per speaker in `~/.config/merlin/library/` and merged into the playlist from Merlin's servers at every sync. Merlin's servers regenerate the speaker's hierarchy each time, so they have to be re-inserted. Imported files are uploaded with everything else and never sent to Merlin.
+* **Missing folders:** if a folder you chose disappears from the speaker, its tracks go to a "Mes fichiers" folder.
+* **The phone app:** it doesn't know about these files. A sync from the phone rebuilds the hierarchy without them, and they reappear at the next sync from this Mac.
 
 ### Why syncs need admin rights: the traffic filter
 

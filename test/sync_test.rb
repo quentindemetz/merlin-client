@@ -170,6 +170,36 @@ class SyncTest < Minitest::Test
     assert_equal "FAIL", @backend.reports.last[1][:status]
   end
 
+  module SyncFakeMedia
+    module_function
+
+    def probe(_) = Merlin::Media::Info.new(title: "Histoire de papa", duration: 60, codec: "pcm_s16le",
+                                           sample_rate: 48_000, channels: 1, bit_rate: 768_000, has_cover: false)
+    def prepare_audio(_src, dest, _info) = File.write(dest, "MP3 of papa") && :transcoded
+    def prepare_cover(_src, dest, _info) = File.write(dest, "cover of papa") && :default
+    def default_cover(dest) = FileUtils.mkdir_p(File.dirname(dest)) && File.write(dest, "folder cover")
+  end
+
+  def test_imported_audio_is_added_to_the_speaker
+    lib = Merlin::LocalLibrary.new(dir: File.join(@dir, "library"), setting_id: "s1", media: SyncFakeMedia)
+    folder = lib.add_folder("Mes histoires", parent: "u1")
+    File.write(src = File.join(@dir, "papa.wav"), "RIFF")
+    track, = lib.import(src, parent: folder.uuid)
+
+    Merlin::Sync.new(backend: @backend, cache_dir: @dir, wifi: NoWifi.new(@net), library: lib,
+                     speaker_opts: { host: "127.0.0.1", port: @fake.port }, out: out = StringIO.new).run
+
+    assert_equal "MP3 of papa", @fake.files["#{track.uuid}.mp3"]
+    assert_equal "cover of papa", @fake.files["#{track.uuid}.jpg"]
+    assert_equal "folder cover", @fake.files["#{folder.uuid}.jpg"]
+    tree = JSON.parse(@fake.files["playlist-syn-42.json"])
+    assert_equal ["Le loup", "Mes histoires"], tree[0]["child"].map { _1["title"] }
+    assert_equal ["Histoire de papa"], tree[0]["child"][1]["child"].map { _1["title"] }
+    assert_equal 2, @backend.downloads.size, "imported files are never downloaded"
+    assert_match(/Adding 1 of your own audio file\(s\) to the playlist \(1 new folder\(s\)\)/, out.string)
+    assert_equal "SUCCESS", @backend.reports.last[1][:status]
+  end
+
   def test_no_api_call_while_on_speaker_wifi
     run_sync
     assert_empty @net.offline_calls, "Merlin API was called while on the speaker's Wi-Fi"

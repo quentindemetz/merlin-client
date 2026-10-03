@@ -259,6 +259,7 @@ module Merlin
             Row.item("🌍 Browse the catalog", :browse),
             Row.item("🔎 Search the catalog", :search),
             Row.item("🧺 Basket#{" (#{app.basket_count})" if app.basket_count}", :basket),
+            Row.item("🎵 My audio files", :local),
             Row.header("Transfer"),
             Row.item("🔄 Sync now", :sync),
             Row.text(""),
@@ -292,6 +293,7 @@ module Merlin
             when :browse then browse_home
             when :search then app.push(InputScreen.new(app, "Search the catalog") { |q| search(q) })
             when :basket then app.push(BasketScreen.new(app))
+            when :local then app.push(LocalLibraryScreen.new(app))
             when :sync then app.push(SyncScreen.new(app))
             end
           end
@@ -322,7 +324,7 @@ module Merlin
         def initialize(app, title, fields, &on_submit)
           super(app)
           @title = title
-          @fields = fields.map { |label, secret| Field.new(label, +"", secret) }
+          @fields = fields.map { |label, secret, value| Field.new(label, +value.to_s, secret) }
           @focus = 0
           @on_submit = on_submit
         end
@@ -365,8 +367,8 @@ module Merlin
       end
 
       class InputScreen < FormScreen
-        def initialize(app, title, &on_submit)
-          super(app, title, [["Query"]]) do |value|
+        def initialize(app, title, label: "Query", value: nil, &on_submit)
+          super(app, title, [[label, false, value]]) do |value|
             value.strip.empty? ? app.error("Type something first") : on_submit.call(value.strip)
           end
         end

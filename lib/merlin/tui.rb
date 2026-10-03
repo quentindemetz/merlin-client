@@ -4,6 +4,7 @@ require "ratatui_ruby"
 require_relative "../merlin"
 require_relative "tui/screens"
 require_relative "tui/sync_session"
+require_relative "tui/library_screens"
 
 module Merlin
   # Full-screen terminal UI (ratatui_ruby) over the Backend / Sync APIs.
@@ -99,6 +100,9 @@ module Merlin
       end
 
       def new_sync(**) = @sync_factory.call(**)
+
+      # Audio imported from this Mac for the selected speaker.
+      def library = config.library
       def new_isolation(out:) = @isolation_factory.call(out: out)
 
       # Hands the real terminal back (e.g. for sudo's password prompt), then
@@ -209,7 +213,7 @@ module Merlin
 
       def default_sync(out:, wifi:, on_transfer_end: nil, isolation: nil)
         Sync.new(backend: backend, cache_dir: config.cache_dir, wifi: wifi, speaker_opts: speaker_opts, out: out,
-                 on_transfer_end: on_transfer_end, isolation: isolation)
+                 on_transfer_end: on_transfer_end, isolation: isolation, library: library)
       end
 
       def default_isolation(out:)

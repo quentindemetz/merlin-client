@@ -21,6 +21,9 @@ module Merlin
     def cache_dir = File.join(home, "cache")
     def log_dir = File.join(home, "logs")
 
+    # Audio imported from this Mac for the selected speaker.
+    def library(setting_id = self.setting_id) = LocalLibrary.new(dir: File.join(home, "library"), setting_id: setting_id)
+
     # echo: optional ->(line) receiving a one-line summary per exchange.
     def http_log(echo: nil) = HttpLog.new(dir: log_dir, echo: echo)
     def speaker_log(echo: nil) = SpeakerLog.new(dir: log_dir, echo: echo)

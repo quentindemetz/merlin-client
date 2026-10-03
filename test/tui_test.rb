@@ -180,6 +180,40 @@ class TUITest < Minitest::Test
     speaker&.stop
   end
 
+  # Real ffmpeg on a tiny WAV: My audio files -> import -> new folder -> done.
+  def test_import_audio_into_a_new_folder
+    skip "ffmpeg not installed" unless Merlin::Media.available?
+    @config.setting_id = "s1"
+    wav = File.join(@dir, "berceuse.wav")
+    Merlin::Media.ffmpeg!("-f", "lavfi", "-i", "sine=d=1:sample_rate=22050", "-ac", "1", wav)
+    with_test_terminal(100, 30, timeout: 15) do
+      # Menu: End=Quit, Up=Sync now, Up=My audio files
+      inject_keys(:end, :up, :up, :enter, "i", *wav.chars, :enter, # path -> destination screen
+                  :enter, *"Mes histoires".chars, :enter)            # "New folder in Contes…" -> name it
+      app(FakeBackend.new).run(stop_when: lambda { |a|
+        a.screen.is_a?(Merlin::TUI::Screens::LocalLibraryScreen) && screen_text.include?("berceuse")
+      })
+      assert_includes screen_text, "Mes histoires  (your folder)"
+      assert_includes screen_text, "1 file(s) imported (1 transcoded)"
+    end
+    lib = @config.library
+    folder = lib.folders.first
+    assert_equal ["Mes histoires", "f"], [folder.title, folder.parent] # inside the speaker's "Contes" section
+    track = lib.tracks.first
+    assert_equal ["berceuse", folder.uuid], [track.title, track.parent]
+    info = Merlin::Media.probe(lib.audio_path(track.uuid))
+    assert_equal ["mp3", 44_100, 1], [info.codec, info.sample_rate, info.channels]
+  end
+
+  def test_import_rejects_paths_without_audio
+    @config.setting_id = "s1"
+    with_test_terminal(100, 30) do
+      inject_keys(:end, :up, :up, :enter, "i", *File.join(@dir, "nothing-here.mp3").chars, :enter)
+      app(FakeBackend.new).run(stop_when: ->(_) { screen_text.include?("no such file") })
+    end
+    assert @config.library.empty?
+  end
+
   def test_traffic_filter_can_be_turned_off
     @config.setting_id = "s1"
     calls = []

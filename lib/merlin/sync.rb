@@ -27,7 +27,8 @@ module Merlin
     # on_transfer_end: optional ->(report) called once the speaker part is over
     # (success or failure), before reconnecting and reporting to Merlin.
     def initialize(backend:, cache_dir:, wifi:, speaker_opts: {}, out: $stdout, dry_run: false,
-                   internet_wait: 15, on_transfer_end: nil, isolation: nil)
+                   internet_wait: 15, on_transfer_end: nil, isolation: nil, library: nil)
+      @library = library # audio imported from this Mac (LocalLibrary), merged into the playlist
       @on_transfer_end = on_transfer_end
       @isolation = isolation # keeps the Mac's other traffic off the speaker (see Isolation)
       @backend = backend
@@ -49,12 +50,13 @@ module Merlin
       save_json("last_synchro.json", plan)
       say "Synchro #{id}: #{plan.fetch('fileList', []).size} file(s) in plan"
 
-      return prepare_files(plan) && write_playlist(plan) && plan if @dry_run
+      return merge_library(plan) && prepare_files(plan) && write_playlist(plan) && plan if @dry_run
 
       # From here on every outcome is reported, so the synchro never stays PENDING.
       report = { type: type }
       offline = false
       begin
+        merge_library(plan)
         files = prepare_files(plan)
         playlist = write_playlist(plan)
         # No Merlin API call may happen from here until we're back online:
@@ -122,6 +124,11 @@ module Merlin
     def prepare_files(plan)
       dir = File.join(@cache_dir, "sync_files")
       files = plan.fetch("fileList", []).map do |f|
+        if f["path"] # imported from this Mac (LocalLibrary): nothing to download
+          raise Errno::ENOENT, f["path"] unless File.size?(f["path"])
+
+          next f
+        end
         path = File.join(dir, File.basename(f.fetch("filename")))
         # Like the app: reuse any non-empty cached file. Don't compare with
         # "filesize" — the API reports a placeholder (20000) for images.
@@ -135,6 +142,18 @@ module Merlin
       files
     rescue BackendError, SystemCallError, IOError, URI::Error => e # transport errors arrive as OfflineError
       raise Failure.new("202_FAILED_ON_PREPARE_CONTENT_FILES", e.message)
+    end
+
+    def merge_library(plan)
+      return true unless @library && !@library.empty?
+
+      summary = @library.merge!(plan)
+      say "Adding #{summary[:tracks]} of your own audio file(s) to the playlist" \
+          "#{" (#{summary[:folders]} new folder(s))" if summary[:folders].positive?}"
+      summary[:relocated].each { |t| say "  note: #{t.inspect}'s folder is no longer on the speaker; it goes to \"#{LocalLibrary::FALLBACK_FOLDER}\"" }
+      true
+    rescue JSON::ParserError, KeyError, Error => e
+      raise Failure.new("203_FAILED_ON_PREPARE_CONTENT_PLAYLIST", "could not add your own audio files: #{e.message}")
     end
 
     def write_playlist(plan)
