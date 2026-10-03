@@ -225,10 +225,11 @@ class SyncTest < Minitest::Test
     refute File.exist?(File.join(@dir, "pending_report.json"))
   end
 
-  def fast_sync(out = StringIO.new)
+  # pauses: optional array collecting the requested pause durations.
+  def fast_sync(out = StringIO.new, pauses: nil)
     Merlin::Sync.new(backend: @backend, cache_dir: @dir, wifi: NoWifi.new(@net), internet_wait: 0,
                      speaker_opts: { host: "127.0.0.1", port: @fake.port, ack_timeout: 0.1 }, out: out)
-                .tap { |s| s.define_singleton_method(:pause) { |*| nil } }
+                .tap { |s| s.define_singleton_method(:pause) { |secs| pauses&.push(secs) } }
   end
 
   # Verte at image 36: the speaker stops answering an upload. Like the app,
@@ -290,10 +291,8 @@ class SyncTest < Minitest::Test
 
   def test_gives_up_after_all_retries_when_speaker_stays_silent
     @fake.silent_uploads = (2..100).to_a
-    sync = fast_sync
     pauses = []
-    sync.define_singleton_method(:pause) { |s| pauses << s }
-    err = assert_raises(Merlin::Sync::Failure) { sync.run }
+    err = assert_raises(Merlin::Sync::Failure) { fast_sync(pauses: pauses).run }
     assert_equal "508_FAILED_ON_SDK_TIMEOUT", err.code
     assert_equal 1 + Merlin::Sync::LINK_RETRIES, @fake.connections # first try + one reconnect per retry
     # One short pause before each of the 8 retries.

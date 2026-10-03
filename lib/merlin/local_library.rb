@@ -130,7 +130,7 @@ module Merlin
           relocated << t.title
           parent = fallback_folder(sections.first, containers, files)
         end
-        parent["child"] <<{ "uuid" => t.uuid, "title" => t.title, "add_time" => t.added_at, "limit_time" => 0,
+        parent["child"] << { "uuid" => t.uuid, "title" => t.title, "add_time" => t.added_at, "limit_time" => 0,
                              "type" => "free" }
         files << file_entry(t, "image") << file_entry(t, "audio")
       end
