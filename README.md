@@ -49,7 +49,7 @@ block out quick on en0 from 192.168.4.0/24 to any
 
 * **What it allows:** only the transfer and DHCP leave the Mac from the speaker's subnet. Routing is untouched.
 * **When it's active:** it's applied just before joining the speaker Wi-Fi and removed as soon as the speaker part ends.
-* **Admin password:** `sudo` asks for it once, before downloads. The tool never sees it. The sudo session is kept alive during long transfers.
+* **Admin password:** `sudo` asks for it once, before downloads, and the tool never sees it. That single `sudo` starts a small helper with admin rights that only knows "filter on" and "filter off". It lives for the duration of the sync and exits by itself if the app goes away. This works even when sudo is set never to remember the password (`Defaults timestamp_timeout=0`, common on managed Macs, including this one).
 * **Leftovers:** if a sync dies, the next one removes the old rule first, or you can run `bin/merlin unisolate`.
 * **Opting out:** use `--no-isolate` or the toggle in the TUI. The speaker will likely crash.
 

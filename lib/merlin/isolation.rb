@@ -17,20 +17,46 @@ module Merlin
   # We install a pf rule (macOS's packet filter) that only lets our TCP session
   # and DHCP leave the Mac from the speaker's subnet. Rules live in the
   # com.apple/merlin anchor, which the stock /etc/pf.conf evaluates, and only
-  # match traffic sourced from the speaker subnet. Needs admin rights (sudo).
+  # match traffic sourced from the speaker subnet.
+  #
+  # Admin rights: sudo may be configured never to cache credentials
+  # (`Defaults timestamp_timeout=0`, common on managed Macs), so instead of
+  # several sudo calls we start one small root helper (one password prompt)
+  # that stays alive for the sync and only knows "on" and "off".
   class Isolation
     ANCHOR = "com.apple/merlin"
-    KEEPALIVE = 60 # seconds between `sudo -v` refreshes (sudo forgets after 5 min)
+    REPLY_TIMEOUT = 15
 
-    # runner: ->(argv, stdin) { [output, success] } — injectable for tests.
+    # $1 = rules, $2 = pfctl path. Reads "on" / "off <token>" / "quit" lines.
+    HELPER = <<~'SH'
+      rules=$1; pfctl=$2
+      echo __READY__
+      while IFS= read -r cmd; do
+        case "$cmd" in
+          on)
+            if printf '%s' "$rules" | "$pfctl" -a com.apple/merlin -f - 2>&1 && "$pfctl" -E 2>&1
+            then echo __OK__; else echo __FAIL__; fi ;;
+          off*)
+            tok=${cmd#off}; tok=${tok# }
+            if "$pfctl" -a com.apple/merlin -F all 2>&1
+            then [ -z "$tok" ] || "$pfctl" -X "$tok" 2>&1; echo __OK__; else echo __FAIL__; fi ;;
+          quit) exit 0 ;;
+          *) echo "unknown command"; echo __FAIL__ ;;
+        esac
+      done
+    SH
+
+    # sudo / pfctl are injectable so tests can run the real helper script
+    # against a fake pfctl, without admin rights.
     def initialize(state_path:, interface: nil, speaker_ip: "192.168.4.1", port: 50_000,
-                   subnet: "192.168.4.0/24", runner: nil, out: $stdout)
+                   subnet: "192.168.4.0/24", sudo: ["sudo"], pfctl: "/sbin/pfctl", out: $stdout)
       @state_path = state_path
       @interface = interface
       @speaker_ip = speaker_ip
       @port = port
       @subnet = subnet
-      @runner = runner || method(:run_command)
+      @sudo = sudo
+      @pfctl = pfctl
       @out = out
     end
 
@@ -45,37 +71,47 @@ module Merlin
 
     def active? = !@token.nil?
     def leftover? = File.exist?(@state_path)
+    def authorized? = !@helper.nil? && @wait&.alive?
 
-    # Interactive: lets sudo ask for the admin password on the terminal, then
-    # keeps the sudo session alive so enable!/disable! work non-interactively
-    # however long downloads and transfers take.
+    # Interactive: sudo asks for the admin password on the terminal (once),
+    # then the helper waits for on/off requests.
     def authorize!
-      raise Error, "admin rights are needed to isolate the speaker (sudo failed)" unless system("sudo", "-v")
+      return true if authorized?
 
-      start_keepalive
-      true
+      @helper_in, @helper_out, @wait = Open3.popen2e(*@sudo, "/bin/sh", "-c", HELPER, "merlin-isolation", rules, @pfctl)
+      @helper = true
+      # sudo may print "Sorry, try again." and re-prompt: wait for the helper.
+      said = []
+      while (line = @helper_out.gets)
+        return true if line.start_with?("__READY__")
+
+        said << line.strip
+      end
+      shutdown_helper
+      raise Error, "admin rights are needed to isolate the speaker (sudo failed#{": #{said.last}" if said.any?})"
     end
 
     def enable!
       release_leftover
-      sudo!("pfctl", "-a", ANCHOR, "-f", "-", stdin: rules)
-      output = sudo!("pfctl", "-E")
+      output = call("on")
       @token = output[/Token\s*:\s*(\d+)/, 1]
       FileUtils.mkdir_p(File.dirname(@state_path))
       File.write(@state_path, JSON.generate(token: @token, interface: interface))
       @out.puts "Traffic filter on: only the transfer can reach the speaker."
       true
+    rescue Error
+      shutdown_helper
+      raise
     end
 
     def disable!(keep_session: false)
-      sudo!("pfctl", "-a", ANCHOR, "-F", "all")
-      sudo!("pfctl", "-X", @token) if @token
+      call("off #{@token}")
       @token = nil
       FileUtils.rm_f(@state_path)
       @out.puts "Traffic filter off."
       true
     ensure
-      stop_keepalive unless keep_session
+      shutdown_helper unless keep_session
     end
 
     # A previous run that died left rules/pf enabled: clean them up.
@@ -87,6 +123,15 @@ module Merlin
       disable!(keep_session: true)
     end
 
+    def shutdown_helper
+      return unless @helper
+
+      @helper_in.puts("quit") rescue nil
+      [@helper_in, @helper_out].each { _1.close rescue nil }
+      @wait&.join(2)
+      @helper = @helper_in = @helper_out = @wait = nil
+    end
+
     private
 
     def interface
@@ -96,33 +141,24 @@ module Merlin
       end
     end
 
-    def sudo!(*cmd, stdin: nil)
-      output, ok = @runner.call(["sudo", "-n", *cmd], stdin)
-      raise Error, "#{cmd.join(' ')} failed: #{output.to_s.strip}" unless ok
+    # Sends one request to the root helper; returns its output.
+    def call(cmd)
+      raise Error, "not authorized: the traffic filter needs admin rights first" unless authorized?
 
-      output.to_s
-    end
+      @helper_in.puts(cmd)
+      @helper_in.flush
+      output = +""
+      loop do
+        raise Error, "traffic filter helper did not answer" unless @helper_out.wait_readable(REPLY_TIMEOUT)
 
-    def run_command(argv, stdin)
-      out, status = Open3.capture2e(*argv, stdin_data: stdin.to_s)
-      [out, status.success?]
-    end
+        line = @helper_out.gets or raise Error, "traffic filter helper exited"
+        return output if line.start_with?("__OK__")
+        raise Error, "pfctl #{cmd.split.first} failed: #{output.strip.lines.last&.strip}" if line.start_with?("__FAIL__")
 
-    def start_keepalive
-      return if @keepalive&.alive?
-
-      @keepalive = Thread.new do
-        loop do
-          sleep KEEPALIVE
-          @runner.call(%w[sudo -n -v], nil)
-        end
+        output << line
       end
-      @keepalive.report_on_exception = false
-    end
-
-    def stop_keepalive
-      @keepalive&.kill
-      @keepalive = nil
+    rescue IOError, SystemCallError => e
+      raise Error, "traffic filter helper: #{e.message}"
     end
   end
 end

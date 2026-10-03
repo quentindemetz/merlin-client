@@ -146,6 +146,8 @@ module Merlin
       isolation = config.isolation(speaker_ip: @opts[:host], port: @opts[:port])
       isolation.authorize!
       isolation.leftover? ? isolation.release_leftover : isolation.disable!
+    ensure
+      isolation&.shutdown_helper
     end
 
     def cmd_tui
