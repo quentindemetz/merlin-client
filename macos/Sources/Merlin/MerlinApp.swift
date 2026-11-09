@@ -15,6 +15,13 @@ struct MerlinApp: App {
     }
     .commands {
       CommandGroup(replacing: .newItem) {}
+      CommandGroup(after: .textEditing) {
+        Button("Search Catalog") {
+          delegate.model.section = .search
+          delegate.model.searchFocusRequest += 1
+        }
+        .keyboardShortcut("f", modifiers: .command)
+      }
       CommandMenu("Library") {
         Button("Show Library") { delegate.model.section = .library }
           .keyboardShortcut("1", modifiers: .command)

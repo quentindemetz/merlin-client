@@ -48,35 +48,69 @@ struct CatalogBrowser: View {
 
 struct SearchView: View {
   @Environment(AppModel.self) private var app
+  @FocusState private var fieldFocused: Bool
 
   var body: some View {
     @Bindable var app = app
-    NavigationStack(path: $app.searchPath) {
-      Group {
-        if app.searchQuery.isEmpty {
-          ContentUnavailableView("Search the catalog", systemImage: "magnifyingglass",
-                                 description: Text("Type a title, a character or an author in the search field."))
-        } else {
-          Loading(key: [app.searchQuery, String(app.contentVersion)], "Searching…",
-                  load: { [backend = app.backend, q = app.searchQuery] in try backend.search(q) }) { results, _ in
-            let items = CatalogSection.unique(results.compactMap(CatalogItem.element))
-            if items.isEmpty {
-              ContentUnavailableView.search(text: app.searchQuery)
-            } else {
-              ItemList(sections: [CatalogSection(id: 0, title: "Results", items: items)])
+    VStack(spacing: 0) {
+      // A field of its own: .searchable on a view swapped into the split
+      // view's detail never reaches the window toolbar on macOS.
+      HStack(spacing: 6) {
+        Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
+        TextField("Search the catalog", text: $app.searchText)
+          .textFieldStyle(.plain)
+          .focused($fieldFocused)
+          .onSubmit(submit)
+        if !app.searchText.isEmpty {
+          Button {
+            app.searchText = ""
+            fieldFocused = true
+          } label: { Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary) }
+            .buttonStyle(.plain)
+            .help("Clear")
+        }
+      }
+      .padding(.horizontal, 10)
+      .padding(.vertical, 7)
+      .background(.quaternary.opacity(0.6), in: RoundedRectangle(cornerRadius: 8))
+      .padding(.horizontal, 16)
+      .padding(.vertical, 10)
+      Divider()
+      NavigationStack(path: $app.searchPath) {
+        Group {
+          if app.searchQuery.isEmpty {
+            ContentUnavailableView("Search the catalog", systemImage: "magnifyingglass",
+                                   description: Text("Type a title, a character or an author above, then press Return."))
+          } else {
+            Loading(key: [app.searchQuery, String(app.contentVersion)], "Searching…",
+                    load: { [backend = app.backend, q = app.searchQuery] in try backend.search(q) }) { results, _ in
+              let items = CatalogSection.unique(results.compactMap(CatalogItem.element))
+              if items.isEmpty {
+                ContentUnavailableView.search(text: app.searchQuery)
+              } else {
+                ItemList(sections: [CatalogSection(id: 0, title: "Results", items: items)])
+              }
             }
           }
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .navigationTitle(app.searchQuery.isEmpty ? "Search" : "“\(app.searchQuery)”")
+        .navigationDestination(for: CatalogRoute.self) { destination($0) }
       }
-      .navigationTitle(app.searchQuery.isEmpty ? "Search" : "“\(app.searchQuery)”")
-      .navigationDestination(for: CatalogRoute.self) { destination($0) }
+      .frame(maxHeight: .infinity)
     }
-    .searchable(text: $app.searchText, placement: .toolbar, prompt: "Search the catalog")
-    .onSubmit(of: .search) {
-      app.searchPath = []
-      app.searchQuery = app.searchText.trimmingCharacters(in: .whitespaces)
-    }
+    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
     .environment(\.openRoute) { CatalogRoute.open($0, in: &app.searchPath) }
+    // The sidebar keeps the focus after a click on "Search": take it just after.
+    .onAppear { DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { fieldFocused = true } }
+    .onChange(of: app.searchFocusRequest) { fieldFocused = true }
+  }
+
+  private func submit() {
+    let q = app.searchText.trimmingCharacters(in: .whitespaces)
+    guard !q.isEmpty else { return }
+    app.searchPath = []
+    app.searchQuery = q
   }
 }
 

@@ -43,6 +43,8 @@ final class AppModel {
   var searchPath: [CatalogRoute] = []
   var searchText = ""
   var searchQuery = ""
+  /// Bumped to put the cursor in the search field (⌘F).
+  var searchFocusRequest = 0
 
   /// Bumped when the speaker selection changes, so catalog lists reload.
   var contentVersion = 0
