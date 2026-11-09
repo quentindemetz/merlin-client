@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleIdentifier</key><string>com.merlin-laptop.Merlin</string>
+  <key>CFBundleName</key><string>Merlin</string>
+  <key>CFBundleDisplayName</key><string>Merlin</string>
+  <key>CFBundleExecutable</key><string>Merlin</string>
+  <key>CFBundleIconFile</key><string>AppIcon</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleShortVersionString</key><string>1.0</string>
+  <key>CFBundleVersion</key><string>1</string>
+  <key>LSMinimumSystemVersion</key><string>14.0</string>
+  <key>LSApplicationCategoryType</key><string>public.app-category.utilities</string>
+  <key>NSHighResolutionCapable</key><true/>
+  <key>NSSupportsAutomaticTermination</key><false/>
+  <key>NSLocationUsageDescription</key>
+  <string>Merlin reads the current Wi-Fi network name so it can switch to the speaker and back.</string>
+  <key>NSLocationWhenInUseUsageDescription</key>
+  <string>Merlin reads the current Wi-Fi network name so it can switch to the speaker and back.</string>
+  <key>NSAppleEventsUsageDescription</key>
+  <string>Merlin asks for your administrator password to keep this Mac's other traffic away from the speaker during transfers.</string>
+</dict>
+</plist>

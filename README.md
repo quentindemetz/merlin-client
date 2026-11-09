@@ -5,6 +5,138 @@ A standalone Ruby (stdlib only) replacement for the Android app
 from the APK. It does the same content transfer as the app's "Mon enceinte"
 tab, plus a few low-level speaker commands.
 
+## Mac app
+
+`macos/` is a native SwiftUI app, rewritten in Swift (no Ruby needed). It is
+organised around a **library** on this Mac, filled from two sources (the Merlin
+catalog and your own audio files) and sent to two kinds of devices (a Merlin
+speaker or an iPod). It shares the login, selected speaker, logs and pending
+reports in `~/.config/merlin` with the CLI, but not the CLI's imported audio.
+
+```sh
+cd macos
+./build-app.sh            # → build/Merlin.app (add --install to copy it to /Applications)
+./test.sh                 # core tests (fake speaker, real pf helper script against a fake pfctl)
+```
+
+Both scripts work with the Xcode Command Line Tools alone.
+
+### The library
+
+The library is one folder, `~/Music/Merlin Library` by default (*Library ›
+Choose Library Folder…* picks or creates another). It holds every audio file
+and cover, each named after a UUID (`<uuid>.mp3`, `<uuid>.jpg`), next to
+`Library.sqlite`, which stores everything known about them. The database only
+records file names relative to the folder, so the folder can be moved, copied
+to another disk or opened from another Mac as is.
+
+* **Folders:** media is organised in folders: a Merlin collection, an album,
+  or one you make. Each folder sits in a speaker section (Histoires, Musique,
+  Documentaires…, plus the sections your speaker actually has, learned at each
+  sync). Folders can be renamed, reordered, given a cover or moved to another
+  section, and tracks renamed, moved or deleted.
+* **From the Merlin catalog:** *Browse* and *Search* (logged in) show the
+  catalog. *Download to Library* fetches the selected episodes, a whole
+  collection, or one episode from its page. Episodes go into their
+  collection's folder, made with the collection's cover on first use; episodes
+  without a collection go to "Épisodes Merlin". Episodes already in the library
+  can't be downloaded again: catalog rows show a checkmark and *Downloaded*
+  (collections show how many episodes you have), and the download buttons are
+  disabled for them. Downloads run one at a time in the background; the bar at
+  the bottom shows the bytes downloaded out of the total queued (sizes come
+  from the catalog), with speed, time left and a Cancel button.
+* **Purchases:** some paid audio (on `secure.bayard.io`) has no usable
+  catalog link; Merlin only signs it in the sync plan of a speaker the episode
+  is waiting to be sent to. Downloading such an episode or collection works
+  like any other: the app plays the app's part of a sync without the speaker.
+  It adds the episodes to a speaker (the selected one first, then the others),
+  starts a synchro, downloads from the plan, reports the synchro as aborted and
+  cancels the addition, so the speaker is left as it was. Episodes the speaker
+  already has are removed in Merlin (a synchro reported as a success), added
+  again, and settled by a second success report; whatever else was waiting
+  for the speaker is put aside meanwhile and restored. Merlin caps the titles
+  per speaker (120 titles waiting at most, and its free space), so this goes in batches of up to 100 that shrink as needed. *Library › Import Purchases from
+  Speaker* does it for every paid episode a speaker has.
+* **From your files:** *Import Files…* in the toolbar, or drop files and folders
+  on the library. They go into a folder per album tag ("Mes fichiers" for files
+  without one), a new folder, or an existing one. Files are kept as they are
+  (MP3 at any bitrate, AAC/ALAC, WAV, AIFF, FLAC); only formats macOS can't
+  play (Ogg, Opus, WMA, WebM) are converted, to 256 kbps MP3. ffmpeg reads
+  tags and artwork and does the conversions (`brew install ffmpeg`).
+* **Device copies:** devices get converted copies only when they need one. The
+  speaker needs MP3 at 44.1 kHz up to 192 kbps, so anything else gets a 128k
+  (64k mono) copy at sync time. The iPod needs MP3, so other formats get a
+  256k copy. Copies are made several at a time, cached in
+  `~/.config/merlin/cache/converted/`, and remade only when the original changes.
+* **Playing:** double-click a track (or select it and press Return or Space)
+  to play it and the rest of its folder; folders have a Play button and a
+  *Play Folder* menu item. The player bar at the bottom has previous / play /
+  next and a seek bar; *Controls* has Play/Pause (⌥⌘P), Next (⌘→) and
+  Previous (⌘←), and the keyboard's media keys and Control Center work too.
+* **Covers** are kept at up to 600 px, enough for an iPod classic. They are
+  also embedded in the MP3s themselves (ID3 picture frame; the folder's cover
+  for tracks without their own), so the files show their art in any player.
+  The tag's other frames are kept. Changing a folder's cover or moving tracks
+  rewrites the embedded covers in the background, and a library made before
+  this gets a one-time pass when it's opened. The speaker
+  gets 128×128 crops made at each sync. A folder without a cover gets one with
+  its name on it on the speaker, since the speaker doesn't display folder names.
+
+### Sending to a speaker
+
+*Send To › Speaker* (⇧⌘S) sends the library to the selected speaker, over the
+same transfer as the CLI (see *Sync now* below). Each device has its own
+checklist of folders, all checked by default.
+
+The speaker gets the checked folders in place of what Merlin's servers would
+put on it. The synchro still starts on Merlin's servers, for the speaker's
+Wi-Fi credentials, settings and the report. Merlin's sections (with their
+covers) and the favorites node are kept, but emptied. Each library folder then
+goes into the section of the same name (compared without case or accents), or
+the first section. Titles are shortened to the speaker's 63 bytes. A sync from
+the phone app puts Merlin's own content back until the next sync from the Mac.
+
+* **Wi-Fi:** the app reads Wi-Fi names itself (CoreWLAN) and asks for Location
+  Services at first launch. The separate *Merlin Wi-Fi* helper isn't used.
+* **Traffic filter:** the admin password is asked with the standard macOS
+  dialog, at the first sync of the session. The same `pf` rules are applied by a
+  small root helper that talks to the app over two private FIFOs and exits when the
+  app quits. *Speaker › Remove Traffic Filter…* replaces `merlin unisolate`.
+* **Quitting during a transfer** aborts it. The app reconnects to your network and reports the
+  abort to Merlin before it exits.
+
+### Sending to an iPod
+
+*Send To › iPod* (or *Speaker › Copy to iPod*, ⇧⌘I) copies the library's checked
+folders to a click-wheel iPod mounted as a disk. No Merlin account is needed.
+
+On the iPod, each folder becomes an album and a playlist, and all tracks get the
+genre "Merlin". Tracks without an artist get their folder's section as artist.
+Copying again only copies what changed and removes what's no longer selected.
+
+The database code is a Swift port of libgpod, the library Amarok uses for iPods
+(`MerlinCore/ITunesDB.swift`). Unlike libgpod, it leaves the records Merlin didn't
+write byte for byte: your own tracks, playlists, smart playlists and artwork links.
+It also folds the iPod's play counts and On-The-Go playlists in.
+
+* What Merlin added is listed in `iPod_Control/iTunes/Merlin.json`.
+* The first database is kept as `iTunesDB.before-merlin`, and the previous one
+  as `iTunesDB.merlin-previous`.
+* Models up to the 5th-generation iPod (video), nano 1–2 and mini need no
+  checksum. The classic and nano 3–4 need the hash58 checksum, keyed from the
+  FireWire ID (read from `SysInfo`/`SysInfoExtended` or the USB serial number).
+* **Covers:** each track gets its own cover, or its folder's. They're written
+  at the sizes the model shows (`MerlinCore/ArtworkDB.swift`, ported from libgpod's
+  artwork writer). Merlin's thumbnails go into their own `.ithmb` files, rewritten
+  at each copy; the owner's artwork is kept. Covers show on the iPod photo,
+  video, classic and nano 1–4.
+* Not supported: shuffle, nano 5+, touch.
+* Turn off automatic syncing for the iPod in Finder, or Finder may remove what
+  Merlin copied.
+
+`MERLIN_HOME` works as for the CLI. `MERLIN_API_BASE` / `MERLIN_TOKEN_URL`
+point the app at another server, e.g. a local mock.
+
 ## Usage
 
 ```sh
