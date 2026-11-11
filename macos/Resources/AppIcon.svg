@@ -1,0 +1,59 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <!-- Merlin app icon: a wand whose tip sends out notes and sparkles, on indigo.
+       All shapes drawn here (no SF Symbols: their licence excludes app icons).
+       make-icon.swift renders this file at every icon size. -->
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#3A2E8C"/>
+      <stop offset="1" stop-color="#121640"/>
+    </linearGradient>
+    <linearGradient id="stick" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FFD666"/>
+      <stop offset="1" stop-color="#F0AA32"/>
+    </linearGradient>
+    <radialGradient id="glow">
+      <stop offset="0" stop-color="#FFECAA" stop-opacity="0.6"/>
+      <stop offset="1" stop-color="#FFECAA" stop-opacity="0"/>
+    </radialGradient>
+    <clipPath id="tileClip">
+      <rect x="100" y="100" width="824" height="824" rx="185"/>
+    </clipPath>
+    <!-- An eighth note with its head centred on 0,0. -->
+    <g id="note">
+      <ellipse cx="0" cy="0" rx="50" ry="36" transform="rotate(-22)"/>
+      <rect x="30" y="-178" width="18" height="172" rx="4"/>
+      <path d="M30 -178 H48 C52 -140 80 -122 104 -98 C130 -72 136 -36 118 0
+               C124 -34 112 -58 86 -76 C68 -88 48 -94 30 -100 Z"/>
+    </g>
+    <!-- A four-pointed sparkle of radius 1, centred on 0,0. -->
+    <path id="sparkle" d="M0 -1 C0.1 -0.22 0.22 -0.1 1 0 C0.22 0.1 0.1 0.22 0 1
+                          C-0.1 0.22 -0.22 0.1 -1 0 C-0.22 -0.1 -0.1 -0.22 0 -1 Z"/>
+  </defs>
+
+  <!-- Soft shadow under the tile: layered translucent tiles (no filters, which
+       AppKit's SVG renderer ignores). -->
+  <g fill="#000">
+    <rect x="88" y="104" width="848" height="848" rx="197" opacity="0.04"/>
+    <rect x="93" y="104" width="838" height="840" rx="192" opacity="0.06"/>
+    <rect x="97" y="104" width="830" height="832" rx="188" opacity="0.08"/>
+  </g>
+  <rect x="100" y="100" width="824" height="824" rx="185" fill="url(#tile)"/>
+
+  <g clip-path="url(#tileClip)">
+    <!-- Glow at the wand's tip. -->
+    <circle cx="573" cy="451" r="185" fill="url(#glow)"/>
+
+    <!-- The wand, from the lower left up to its white tip. -->
+    <g transform="translate(276 748) rotate(-45)">
+      <rect x="-6" y="-24" width="432" height="64" rx="32" fill="#000" opacity="0.18" transform="rotate(45) translate(0 12) rotate(-45)"/>
+      <rect x="0" y="-28" width="420" height="56" rx="28" fill="url(#stick)"/>
+      <rect x="336" y="-28" width="84" height="56" rx="28" fill="#FFFFFF"/>
+    </g>
+
+    <!-- Notes and sparkles coming out of it. -->
+    <use href="#note" fill="#FFD666" transform="translate(680 360) rotate(-8) scale(1.0)"/>
+    <use href="#note" fill="#FFECAA" transform="translate(452 322) rotate(10) scale(0.6)"/>
+    <use href="#sparkle" fill="#FFECAA" transform="translate(748 562) scale(52)"/>
+    <use href="#sparkle" fill="#FFECAA" transform="translate(614 656) scale(30)"/>
+  </g>
+</svg>
