@@ -134,6 +134,46 @@ It also folds the iPod's play counts and On-The-Go playlists in.
 * Turn off automatic syncing for the iPod in Finder, or Finder may remove what
   Merlin copied.
 
+### Backup
+
+*Library › Back Up Now* (⇧⌘B) copies the library to an S3 bucket, and the app
+does it again on its own about 90 seconds after the library changes (not while
+downloads run or the Mac is on the speaker's Wi-Fi). *Library › Restore from
+Backup…* rebuilds the library in a new or empty folder and opens it.
+
+* **What goes up:** `files/<name>` for every audio file and cover the database
+  refers to, then `Library.sqlite` (a consistent snapshot, uploaded after its
+  files) and `backup.json` (track count, size, date, library id). Files are
+  compared by size and MD5, so a backup only sends what's new or changed; the
+  MD5s of local files are cached in `~/.config/merlin/cache/backup/`. Files
+  the library dropped are deleted from the bucket once the new database is up.
+* **One library per bucket:** each library has an id (kept by moves, copies and
+  restores). A backup won't replace another library's backup unless you
+  confirm it (*Back Up Now* asks; automatic backups don't).
+* **Restore** downloads into hidden part files and puts the database in last,
+  so an interrupted restore isn't a library yet: restoring into the same folder
+  again picks up where it stopped.
+* **Settings** (*Merlin › Settings…*): bucket, region, an optional folder in the
+  bucket, the access key ID (in `config.json`) and the secret key (in the login
+  Keychain, item "Merlin S3 Backup"). macOS asks before the app reads it; since
+  the app is ad-hoc signed, a rebuild asks again.
+
+The AWS side is in `infra/backup/` (Terraform): a private bucket (TLS only,
+versioned, replaced or deleted files kept 90 days) and an IAM user,
+`merlin-mac-app`, that can only list, read, write and delete in it. Its
+access key is made outside Terraform so the secret stays out of the state:
+
+```sh
+cd infra/backup
+eval "$(aws configure export-credentials --profile merlin --format env)"
+terraform init && terraform apply
+aws iam create-access-key --user-name merlin-mac-app   # → Merlin › Settings…
+```
+
+The state is local (`terraform.tfstate`, not committed). Tests against the real
+bucket run with `MERLIN_S3_TEST_BUCKET=<bucket> AWS_REGION=… AWS_ACCESS_KEY_ID=…
+AWS_SECRET_ACCESS_KEY=… ./test.sh --filter S3Integration`.
+
 `MERLIN_HOME` works as for the CLI. `MERLIN_API_BASE` / `MERLIN_TOKEN_URL`
 point the app at another server, e.g. a local mock.
 

@@ -38,6 +38,13 @@ struct MerlinApp: App {
         Divider()
         Button("Cancel Downloads and Imports") { delegate.model.tasks.cancelAll() }
           .disabled(!delegate.model.tasks.isBusy)
+        Divider()
+        Button("Back Up Now") { Task { await delegate.model.backup.backUp() } }
+          .keyboardShortcut("b", modifiers: [.command, .shift])
+          .disabled(delegate.model.library == nil || delegate.model.backup.running != nil || !delegate.model.backup.isConfigured)
+        Button("Restore from Backup…") { Task { await delegate.model.backup.restore() } }
+          .disabled(delegate.model.backup.running != nil || !delegate.model.backup.isConfigured)
+        Button("Backup Settings…") { NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil) }
       }
       CommandMenu("Controls") {
         let player = delegate.model.player
@@ -71,6 +78,9 @@ struct MerlinApp: App {
         Button("Log Out") { delegate.model.logout() }
           .disabled(!delegate.model.loggedIn || delegate.model.syncSession?.isActive == true)
       }
+    }
+    Settings {
+      BackupSettingsView().environment(delegate.model)
     }
   }
 }
@@ -125,6 +135,7 @@ struct RootView: View {
         VStack(spacing: 0) {
           PlayerBar()
           TasksBar()
+          BackupBar()
           StatusBar()
         }
       }

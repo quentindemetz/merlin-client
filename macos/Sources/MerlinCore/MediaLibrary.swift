@@ -83,7 +83,12 @@ public final class MediaLibrary: @unchecked Sendable {
     try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
     db = try SQLite(url: root.appendingPathComponent(Self.databaseName))
     try migrate()
+    if meta("library_id") == nil { setMeta("library_id", Self.newID()) }
   }
+
+  /// Identifies this library across moves, copies and restores (a backup
+  /// only ever replaces the backup of the same library).
+  public var libraryID: String { meta("library_id") ?? "" }
 
   public static func exists(at root: URL) -> Bool {
     FileManager.default.fileExists(atPath: root.appendingPathComponent(databaseName).path)
@@ -553,6 +558,35 @@ public final class MediaLibrary: @unchecked Sendable {
       let t = tracks(in: f.id)
       return t.isEmpty ? nil : (f, t)
     }
+  }
+
+  // MARK: Backup
+
+  /// A consistent copy of the database, taken while the library stays usable.
+  public func snapshot(to dest: URL) throws {
+    try? FileManager.default.removeItem(at: dest)
+    try db.run("VACUUM INTO ?", [dest.path])
+  }
+
+  /// What a library database (e.g. a snapshot) holds: the files it refers
+  /// to in the library folder, and its id.
+  public struct Contents: Sendable {
+    public var libraryID: String?
+    public var files: [String]
+    public var folders: Int
+    public var tracks: Int
+  }
+
+  public static func contents(ofDatabase url: URL) throws -> Contents {
+    let db = try SQLite(url: url)
+    let rows = try db.query("""
+      SELECT audio AS name FROM tracks UNION SELECT cover FROM tracks WHERE cover IS NOT NULL
+      UNION SELECT cover FROM folders WHERE cover IS NOT NULL
+      """)
+    func count(_ table: String) -> Int { (try? db.query("SELECT COUNT(*) AS n FROM \(table)"))?.first?["n"]?.int ?? 0 }
+    return Contents(libraryID: (try? db.query("SELECT value FROM meta WHERE key = 'library_id'"))?.first?["value"]?.string,
+                    files: rows.compactMap { $0["name"]?.string }.map { ($0 as NSString).lastPathComponent }.sorted(),
+                    folders: count("folders"), tracks: count("tracks"))
   }
 
   // MARK: Meta

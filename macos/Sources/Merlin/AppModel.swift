@@ -59,6 +59,7 @@ final class AppModel {
   /// Merlin collection id -> episodes of it in the library.
   private(set) var collectionsInLibrary: [String: Int] = [:]
   @ObservationIgnored private(set) var tasks: LibraryTasks!
+  @ObservationIgnored private(set) var backup: BackupModel!
   let player = Player()
 
   static let libraryPathKey = "libraryPath"
@@ -96,6 +97,7 @@ final class AppModel {
     settingID = config.settingID
     locationStatus = location.status
     tasks = LibraryTasks(app: self)
+    backup = BackupModel(app: self)
     let path = UserDefaults.standard.string(forKey: Self.libraryPathKey)
     openLibrary(at: path.map { URL(fileURLWithPath: $0, isDirectory: true) } ?? Self.defaultLibraryURL, remember: false)
     location.onChange = { [weak self] in self?.locationStatus = $0 }
@@ -230,6 +232,7 @@ final class AppModel {
     inLibrary = library?.merlinContentIDs() ?? []
     player.libraryChanged(library)
     collectionsInLibrary = library?.merlinCollectionCounts() ?? [:]
+    backup?.libraryChanged()
   }
 
   enum DownloadState: Equatable {
@@ -310,6 +313,7 @@ final class AppModel {
     panel.directoryURL = library?.root.deletingLastPathComponent()
     guard panel.runModal() == .OK, let url = panel.url else { return }
     guard !tasks.isBusy else { return fail("Wait for the downloads and imports to finish first") }
+    guard backup.running == nil else { return fail("Wait for the backup to finish first") }
     if openLibrary(at: url) { notify("Library: \(url.path)") }
   }
 
