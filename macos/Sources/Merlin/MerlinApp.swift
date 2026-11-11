@@ -44,7 +44,7 @@ struct MerlinApp: App {
           .disabled(delegate.model.library == nil || delegate.model.backup.running != nil || !delegate.model.backup.isConfigured)
         Button("Restore from Backup…") { Task { await delegate.model.backup.restore() } }
           .disabled(delegate.model.backup.running != nil || !delegate.model.backup.isConfigured)
-        Button("Backup Settings…") { NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil) }
+        BackupSettingsButton()
       }
       CommandMenu("Controls") {
         let player = delegate.model.player

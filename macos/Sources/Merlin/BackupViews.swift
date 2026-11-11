@@ -87,6 +87,20 @@ struct BackupSettingsView: View {
   }
 }
 
+/// Library › Backup Settings…: opens the Settings window. (Since macOS 14 the
+/// Settings scene only opens through `openSettings`; the old
+/// `showSettingsWindow:` action does nothing.)
+struct BackupSettingsButton: View {
+  @Environment(\.openSettings) private var openSettings
+
+  var body: some View {
+    Button("Backup Settings…") {
+      NSApp.activate()
+      openSettings()
+    }
+  }
+}
+
 /// A backup or restore in progress.
 struct BackupBar: View {
   @Environment(AppModel.self) private var app
