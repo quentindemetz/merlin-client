@@ -9,7 +9,18 @@
 # in the state (see README.md › Backup).
 
 terraform {
-  required_version = ">= 1.6"
+  required_version = ">= 1.10"
+
+  # The state bucket is managed in state.tf. S3 native locking (use_lockfile)
+  # needs Terraform 1.10+.
+  backend "s3" {
+    bucket       = "merlin-terraform-state-894585424203"
+    key          = "backup/terraform.tfstate"
+    region       = "eu-west-1"
+    encrypt      = true
+    use_lockfile = true
+  }
+
   required_providers {
     aws = {
       source  = "hashicorp/aws"

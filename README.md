@@ -172,7 +172,11 @@ terraform init && terraform apply
 aws iam create-access-key --user-name merlin-mac-app   # → Merlin › Settings…
 ```
 
-The state is local (`terraform.tfstate`, not committed). Tests against the real
+Terraform's state is in S3, in `merlin-terraform-state-<account id>`
+(versioned, locked with S3 native locking), a bucket the same configuration
+manages (`state.tf`, protected by `prevent_destroy`). Starting from scratch in
+a new account means commenting out the `backend "s3"` block, applying, then
+restoring it and running `terraform init -migrate-state`. Tests against the real
 bucket run with `MERLIN_S3_TEST_BUCKET=<bucket> AWS_REGION=… AWS_ACCESS_KEY_ID=…
 AWS_SECRET_ACCESS_KEY=… ./test.sh --filter S3Integration`.
 
