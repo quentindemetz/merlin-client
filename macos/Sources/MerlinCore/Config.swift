@@ -1,8 +1,7 @@
 import Foundation
 
-/// Local state, shared with the Ruby CLI: ~/.config/merlin by default
-/// (override with $MERLIN_HOME). Same files, same formats, so both tools see
-/// the same login, speaker, library and logs.
+/// Local state: ~/.config/merlin by default (override with $MERLIN_HOME):
+/// login, selected speaker, settings, logs, pending reports and caches.
 public final class Config: @unchecked Sendable {
   public let home: URL
   private let lock = NSLock()

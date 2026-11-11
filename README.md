@@ -1,17 +1,15 @@
-# merlin — laptop client for the Merlin kids' speaker
+# merlin — Mac app for the Merlin kids' speaker
 
-A standalone Ruby (stdlib only) replacement for the Android app
+A native macOS app (Swift/SwiftUI, in `macos/`) that replaces the Android app
 `com.hellomerlin` 1.20.5 ("MERLIN – Gérer mon enceinte"), reverse-engineered
-from the APK. It does the same content transfer as the app's "Mon enceinte"
-tab, plus a few low-level speaker commands.
+from the APK. It keeps a library of audio on this Mac, filled from the Merlin
+catalog and your own files, and sends it to a Merlin speaker or an iPod. It
+also backs the library up to S3.
 
-## Mac app
+An earlier Ruby command-line client and terminal UI lived in this repository
+until commit `f956b00`; the git history still has it.
 
-`macos/` is a native SwiftUI app, rewritten in Swift (no Ruby needed). It is
-organised around a **library** on this Mac, filled from two sources (the Merlin
-catalog and your own audio files) and sent to two kinds of devices (a Merlin
-speaker or an iPod). It shares the login, selected speaker, logs and pending
-reports in `~/.config/merlin` with the CLI, but not the CLI's imported audio.
+## Building
 
 ```sh
 cd macos
@@ -19,7 +17,11 @@ cd macos
 ./test.sh                 # core tests (fake speaker, real pf helper script against a fake pfctl)
 ```
 
-Both scripts work with the Xcode Command Line Tools alone.
+Both scripts work with the Xcode Command Line Tools alone. The app's state
+(login, selected speaker, logs, pending reports, caches) lives in
+`~/.config/merlin`; `$MERLIN_HOME` moves it.
+
+## Using the app
 
 ### The library
 
@@ -84,8 +86,8 @@ to another disk or opened from another Mac as is.
 
 ### Sending to a speaker
 
-*Send To › Speaker* (⇧⌘S) sends the library to the selected speaker, over the
-same transfer as the CLI (see *Sync now* below). Each device has its own
+*Send To › Speaker* (⇧⌘S) sends the library to the selected speaker (see
+*Speaker transfers* below). Each device has its own
 checklist of folders, all checked by default.
 
 The speaker gets the checked folders in place of what Merlin's servers would
@@ -97,11 +99,11 @@ the first section. Titles are shortened to the speaker's 63 bytes. A sync from
 the phone app puts Merlin's own content back until the next sync from the Mac.
 
 * **Wi-Fi:** the app reads Wi-Fi names itself (CoreWLAN) and asks for Location
-  Services at first launch. The separate *Merlin Wi-Fi* helper isn't used.
+  Services at first launch.
 * **Traffic filter:** the admin password is asked with the standard macOS
   dialog, at the first sync of the session. The same `pf` rules are applied by a
   small root helper that talks to the app over two private FIFOs and exits when the
-  app quits. *Speaker › Remove Traffic Filter…* replaces `merlin unisolate`.
+  app quits (see *The traffic filter* below).
 * **Quitting during a transfer** aborts it. The app reconnects to your network and reports the
   abort to Merlin before it exits.
 
@@ -174,44 +176,27 @@ The state is local (`terraform.tfstate`, not committed). Tests against the real
 bucket run with `MERLIN_S3_TEST_BUCKET=<bucket> AWS_REGION=… AWS_ACCESS_KEY_ID=…
 AWS_SECRET_ACCESS_KEY=… ./test.sh --filter S3Integration`.
 
-`MERLIN_HOME` works as for the CLI. `MERLIN_API_BASE` / `MERLIN_TOKEN_URL`
+`MERLIN_API_BASE` / `MERLIN_TOKEN_URL`
 point the app at another server, e.g. a local mock.
 
-## Usage
+## Under the hood
 
-```sh
-bundle install                        # ratatui_ruby (native gem, compiles on first install)
-bin/merlin                            # full-screen terminal UI (same as `bin/merlin tui`)
-```
+### Speaker transfers
 
-### Terminal UI
+A sync starts on Merlin's servers, which return the plan (the speaker's Wi-Fi
+credentials, settings and file list). The app then asks you to switch the
+speaker on and press its **Wifi / Transfert** button, joins the speaker's
+network, transfers, goes back to your usual network and reports the result.
 
-* **Log in / Log out.** After login, a single speaker is selected automatically. With several, you get a picker.
-* **Speaker.** Pick which speaker the next actions apply to.
-* **On my speaker.** The speaker's content tree. `space` marks items and `d` queues the marked ones (or the current one) for removal. `c` jumps to the catalog.
-* **My audio files.** Import audio from this Mac into any folder of the speaker, or into a new folder; see below.
-* **Browse / Search the catalog.** `enter` opens categories, collections and contents. `a` adds the marked episodes, or the collection under the cursor. Inside a collection, `A` adds every episode.
-* **Basket.** Pending adds and removals. `x` cancels the marked ones, `s` starts a sync.
-* **Sync now.** Runs the full transfer in the background with a live log. When it's time, a full-screen prompt asks you to switch the speaker on and press its Wifi / Transfert button. The Mac joins the speaker's network by itself as soon as it appears, and goes back to the network it was on when the sync ends, whether it succeeded or failed (see *Wi-Fi switching* below). The admin password for the traffic filter described below is asked once, when the TUI starts, and covers every sync until you quit. If you skip it with Ctrl-C, the first sync asks instead. `ctrl-c` aborts, and the abort is reported to Merlin.
-
-  Nothing talks to the Merlin API while you're on the speaker's Wi-Fi. The report is sent once the Mac is back online. If Merlin isn't reachable within 15 s, the report is saved and sent at the next sync.
-
-### Your own audio files
-
-In the TUI, **My audio files** imports audio from this Mac. Press `i` and type or drag-and-drop paths; files and whole folders both work. Then choose where the files go: an existing folder on the speaker, or **➕ New folder in <section>** (Histoires, Musique, Documentaires…). `n` creates an empty folder, `r` renames, and `x` removes.
-
-* **Transcoding (needs `ffmpeg`, `brew install ffmpeg`):** the speaker plays MP3 at 44.1 kHz, either mono 64 kbps or stereo 128 kbps. MP3s already at 44.1 kHz and up to 192 kbps are copied untouched. Everything else is converted, mono to 64 kbps and stereo to 128 kbps.
-* **Covers:** each track gets a 128×128 JPEG cover, taken from the file's artwork or a plain default. The speaker doesn't display folder names, so each folder you create gets a cover showing its name: white text sized to fit, on a color derived from the name (needs ImageMagick, `brew install imagemagick`; otherwise a plain cover). Renaming a folder redraws its cover, and so does the "Mes fichiers" fallback folder.
-* **Titles:** they come from the file's title tag, or the file name, and are shortened to the speaker's limit like the server does (60 bytes + "...").
-* **Sync:** files are stored per speaker in `~/.config/merlin/library/` and merged into the playlist from Merlin's servers at every sync. Merlin's servers regenerate the speaker's hierarchy each time, so they have to be re-inserted. Imported files are uploaded with everything else and never sent to Merlin.
-* **Missing folders:** if a folder you chose disappears from the speaker, its tracks go to a "Mes fichiers" folder.
-* **The phone app:** it doesn't know about these files. A sync from the phone rebuilds the hierarchy without them, and they reappear at the next sync from this Mac.
+Nothing talks to the Merlin API while the Mac is on the speaker's Wi-Fi. The
+report is sent once the Mac is back online. If Merlin isn't reachable within
+15 s, the report is saved and sent at the next sync.
 
 ### Why syncs need admin rights: the traffic filter
 
 The speaker crashes if this Mac's other traffic reaches it. Joining its Wi-Fi makes the speaker (`192.168.4.1`) the gateway and DNS server for the whole Mac. Every app's reconnects, DNS lookups and captive-portal checks then hit a small device with no internet behind it, and it resets and reboots about 15 s later. The Android app avoids this by binding itself to the speaker network (`requestNetwork` + `bindProcessToNetwork`), so the speaker only ever sees the app's own connection.
 
-On macOS, `sync` reproduces that with a temporary `pf` rule in the `com.apple/merlin` anchor:
+On macOS, the app reproduces that with a temporary `pf` rule in the `com.apple/merlin` anchor:
 
 ```
 pass out quick on en0 proto tcp from 192.168.4.0/24 to 192.168.4.1 port 50000
@@ -221,45 +206,9 @@ block out quick on en0 from 192.168.4.0/24 to any
 
 * **What it allows:** only the transfer and DHCP leave the Mac from the speaker's subnet. Routing is untouched.
 * **When it's active:** it's applied just before joining the speaker Wi-Fi and removed as soon as the speaker part ends.
-* **Admin password:** `sudo` asks for it once per program session (at TUI startup, or at the start of `merlin sync`), and the tool never sees it. That single `sudo` starts a small helper with admin rights that only knows "filter on" and "filter off". It serves every sync until you quit, then exits, and it also exits by itself if the program dies. This works even when sudo is set never to remember the password (`Defaults timestamp_timeout=0`, common on managed Macs, including this one).
-* **Leftovers:** if a sync dies, the next one removes the old rule first, or you can run `bin/merlin unisolate`.
-* **Opting out:** use `--no-isolate` or the toggle in the TUI. The speaker will likely crash.
-
-### Speaker log and recovery
-
-The speaker protocol is traced to `~/.config/merlin/logs/speaker-YYYY-MM-DD.log`: every command and reply with file names, status names and timings, plus timeouts and reconnects. Wi-Fi credentials are never written. Each file's result is also included in the sync report sent to Merlin.
-
-Like the app, a sync survives a speaker that stops answering. On a timeout or a dropped connection, it reconnects and retries the operation, up to 8 more times. Retries are quick: pauses of 1, 1, 2, 2, 3, 3, 5 and 5 s (22 s in total), and 5 s per reconnect attempt. In auto mode it first rejoins the speaker Wi-Fi. This is a safety net for genuine Wi-Fi hiccups; the long outages seen during development were the speaker rebooting under the Mac's other traffic, which the traffic filter prevents. Files that already arrived are skipped by the existence check. A refusal from the speaker (e.g. `NOT_ENOUGH_SPACE`) is not retried.
-
-Apart from applying the playlist, no single wait on the speaker exceeds 15 s. Commands and upload acceptance get 5 s, as does any stalled send. Existence checks get 5 s plus 1 s per MB, because the speaker reads and hashes the whole file first, at about 1.6 MB/s. An upload is then confirmed within 5 s plus 1 s per MB, capped at 15 s. TCP connect gets 3 s and the ping after a (re)connect gets 3 s. Applying the playlist gets 120 s per attempt, because the speaker rebuilds its library. Firmware updates get 15 s. Both are retried like everything else. After the transfer, the report waits up to 15 s for internet; otherwise it is sent at the next sync.
-
-### HTTP log
-
-Every HTTP exchange (API calls, login and token refresh, downloads, connectivity checks) is appended to `~/.config/merlin/logs/http-YYYY-MM-DD.jsonl`. Each line is one exchange: id, time, method, URL, request headers and body, response status, headers and body, duration, or the network error. Files are mode 0600 and kept for 14 days. `-v` also prints one summary line per call. Example query: `jq 'select(.response.status >= 400 or .error)' ~/.config/merlin/logs/http-*.jsonl`.
-
-Redaction happens before anything is written, and before truncation:
-
-* **Removed:** tokens, passwords (account, speaker and home Wi-Fi), `Authorization` and cookie headers, signed-URL parameters, email and username, home Wi-Fi SSID, speaker names, MAC addresses. Email addresses and JWTs inside free text are replaced too.
-* **Kept:** speaker access-point names (`MERLIN_…`), ids, catalog data.
-* **Bodies:** API bodies are logged in full, up to 1 MB. Streamed text or JSON is logged up to 256 KB. Binary downloads are summarised as size, content type and SHA-256.
-
-All HTTP goes through Faraday with a 10 s timeout. That covers connecting and each read or write, so long downloads still work. Network failures surface as "can't reach … — is this Mac still on the speaker's Wi-Fi?" rather than crashing the app.
-
-Keys everywhere: `↑↓`/`j k`, `PgUp`/`PgDn`, `enter`, `esc` back, and `q` quits from the menu.
-
-### Command line
-
-```sh
-bin/merlin login you@example.com      # Hello Merlin account (password prompted)
-bin/merlin speakers                   # list speakers; `bin/merlin use ID` to pick one
-bin/merlin sync                       # full transfer
-bin/merlin sync --dry-run             # create synchro + download files only
-```
-
-`sync` first talks to the cloud (to get the plan and download files), then asks
-you to switch the speaker on and press its **Wifi / Transfert** button. The Mac
-joins the speaker's network by itself, transfers, reconnects to your usual network
-and sends the report.
+* **Admin password:** macOS asks for it with its standard dialog at the first sync of the session, and the app never sees it. It starts a small root helper that only knows "filter on" and "filter off", talks to the app over two private FIFOs, serves every sync until you quit, and exits with the app.
+* **Leftovers:** if a sync dies, the next one removes the old rule first, or use *Speaker › Remove Traffic Filter…*.
+* **Opting out:** the sync page has a toggle. The speaker will likely crash.
 
 ### Wi-Fi switching
 
@@ -267,45 +216,27 @@ and sends the report.
 2. **Join:** the speaker's network is looked for every 3 s, and the Mac joins it as soon as it appears (with its password from the sync plan). It gives up after 10 min.
 3. **Go back:** after the transfer, success or failure, the speaker network is removed from the Mac's saved networks and the Mac rejoins the remembered one. If that's impossible, Wi-Fi is turned off and on so macOS auto-joins its preferred network.
 
-Since macOS 14, the current network's name and scan results are only available to apps with **Location Services**. A tiny background app, *Merlin Wi-Fi* (`lib/merlin/wifi_helper/`), is compiled once into `~/.config/merlin/` with the Xcode command-line tools and asks for that permission. The TUI (at startup) and `merlin sync` check it up front, so macOS's dialog appears while you're there; click **Allow**. Without it, the Mac keeps trying to join the speaker directly and lets macOS pick the network back.
+Since macOS 14, the current network's name and scan results are only available to apps with **Location Services**: the app asks at first launch (click **Allow**). Without it, the Mac keeps trying to join the speaker directly and lets macOS pick the network back.
 
-Browsing the catalog and choosing what goes on the speaker. Every listed line
-starts with a kind and an id, which you pass to the next command. Add `--json`
-to get the raw API response.
+### Speaker log and recovery
 
-```sh
-bin/merlin browse                     # store home page: sliders of taxa, collections, contents
-bin/merlin browse PAGE_ID             # a sub-page ("[taxon] … → page X")
-bin/merlin taxon ID                   # a category ("[taxon] … → taxon X")
-bin/merlin collection ID              # details and episode list
-bin/merlin content ID
-bin/merlin search petit ours brun
-bin/merlin library                    # what is / will be on the speaker
-bin/merlin add CONTENT_ID...          # queue for the next `sync` (also: add-collection ID)
-bin/merlin remove CONTENT_ID...       # queue removal from the speaker
-bin/merlin basket                     # pending changes; `cancel ID...` drops entries
-bin/merlin sync
-```
+The speaker protocol is traced to `~/.config/merlin/logs/speaker-YYYY-MM-DD.log`: every command and reply with file names, status names and timings, plus timeouts and reconnects. Wi-Fi credentials are never written. Each file's result is also included in the sync report sent to Merlin. *Speaker › Show Logs Folder* opens it.
 
-Speaker-only commands (you must already be on the speaker's Wi-Fi):
+Like the phone app, a sync survives a speaker that stops answering. On a timeout or a dropped connection, it reconnects and retries the operation, up to 8 more times. Retries are quick: pauses of 1, 1, 2, 2, 3, 3, 5 and 5 s (22 s in total). This is a safety net for genuine Wi-Fi hiccups; the long outages seen during development were the speaker rebooting under the Mac's other traffic, which the traffic filter prevents. Files that already arrived are skipped by the existence check. A refusal from the speaker (e.g. `NOT_ENOUGH_SPACE`) is not retried.
 
-```sh
-bin/merlin info                       # firmware, battery, storage, clock, MAC
-bin/merlin upload file.mp3 [NAME]     # skipped if an identical file is present
-bin/merlin exists NAME
-bin/merlin get NAME [OUT]
-bin/merlin apply-playlist playlist-xyz.json
-bin/merlin set-time
-bin/merlin set-hours 07:30-19:00 off  # weekday window, weekend window
-bin/merlin listening [OUT]            # raw listening stats (43-byte records)
-```
+Apart from applying the playlist, no single wait on the speaker exceeds 15 s. Commands and upload acceptance get 5 s. Existence checks take longer for big files, because the speaker reads and hashes the whole file first, at about 1.6 MB/s. Applying the playlist gets 120 s per attempt, because the speaker rebuilds its library. Firmware updates get 15 s.
 
-Global options: `--host`, `--port`, `--setting-id`, `-v` (traces protocol and
-HTTP traffic). State is stored in `~/.config/merlin` (override with
-`$MERLIN_HOME`). That covers OAuth tokens (mode 0600; the password is never
-stored), the selected speaker, downloaded files, and the last synchro plan.
+### HTTP log
 
-Tests: `rake` (they use an in-process fake speaker and a fake HTTP server).
+Every exchange with Merlin's servers (API calls, login and token refresh, downloads, connectivity checks) is appended to `~/.config/merlin/logs/http-YYYY-MM-DD.jsonl`. Each line is one exchange: id, time, method, URL, request headers and body, response status, headers and body, duration, or the network error. Files are mode 0600 and kept for 14 days. Example query: `jq 'select(.response.status >= 400 or .error)' ~/.config/merlin/logs/http-*.jsonl`.
+
+Redaction happens before anything is written:
+
+* **Removed:** tokens, passwords (account, speaker and home Wi-Fi), `Authorization` and cookie headers, signed-URL parameters, email and username, home Wi-Fi SSID, speaker names, MAC addresses.
+* **Kept:** speaker access-point names (`MERLIN_…`), ids, catalog data.
+* **Bodies:** API bodies are logged in full, up to 1 MB. Streamed text or JSON is logged up to 256 KB. Binary downloads are summarised as size, content type and SHA-256.
+
+API calls time out after 10 s.
 
 ## Protocol notes
 
