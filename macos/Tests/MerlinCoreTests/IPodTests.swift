@@ -90,6 +90,41 @@ func track(_ title: String, album: String = "Album", artist: String = "Artist", 
     #expect(after.masterPlaylist?.children.filter { $0.tag == "mhip" }.count == 2)
   }
 
+  /// The iPod reads the mhod 52 indexes as track-list positions: the master
+  /// playlist has to keep the track list's order when tracks are re-added
+  /// in a different order, or songs show up under other songs' names.
+  @Test func masterPlaylistFollowsTheTrackList() throws {
+    let db = ITunesDB(name: "iPod")
+    db.replace(tracks: [track("Owner", dbid: 9)], removing: [], playlists: [], removingPlaylists: [])
+    db.replace(tracks: [track("Bravo", dbid: 1), track("Charlie", dbid: 2)], removing: [], playlists: [], removingPlaylists: [])
+    db.replace(tracks: [track("Alpha", dbid: 3), track("Bravo", dbid: 1), track("Charlie", dbid: 2)],
+               removing: [1, 2], playlists: [], removingPlaylists: [])
+    let back = try roundTrip(db)
+    let list = try #require(back.trackList?.children)
+    let mpl = try #require(back.masterPlaylist)
+    #expect(mpl.children.filter { $0.tag == "mhip" }.map(\.itemTrackID) == list.map(\.trackID))
+    let titleIndex = try #require(mpl.children.first {
+      $0.tag == "mhod" && $0.type == MHOD.libraryIndex && Bytes.u32($0.payload, 0) == ITunesDB.SortKeys.Kind.title.rawValue
+    })
+    let positions = (0..<list.count).map { Int(Bytes.u32(titleIndex.payload, 48 + 4 * $0)) }
+    #expect(positions.map { list[$0].string(MHOD.title) } == ["Alpha", "Bravo", "Charlie", "Owner"])
+  }
+
+  @Test func albumArtistKeepsAnAlbumTogether() throws {
+    let db = ITunesDB(name: "iPod")
+    var a = track("Aquarium", album: "Classiques", artist: "Bernstein", dbid: 1)
+    var b = track("Morning Mood", album: "Classiques", artist: "Stanley Black", dbid: 2)
+    a.albumArtist = "Various Artists"
+    b.albumArtist = "Various Artists"
+    db.replace(tracks: [a, b], removing: [], playlists: [], removingPlaylists: [])
+    let back = try roundTrip(db)
+    #expect(back.albumList?.children.count == 1)
+    #expect(back.albumList?.children.first?.string(MHOD.albumArtistName) == "Various Artists")
+    #expect(back.trackString(dbid: 1, MHOD.albumArtist) == "Various Artists")
+    #expect(back.trackString(dbid: 2, MHOD.artist) == "Stanley Black")
+    #expect(back.track(dbid: 1)?.albumID == back.track(dbid: 2)?.albumID)
+  }
+
   @Test func removedTracksLeaveTheOwnersPlaylists() throws {
     let db = ITunesDB(name: "iPod")
     db.replace(tracks: [track("Mine", dbid: 1), track("Merlin", dbid: 2)], removing: [],
@@ -207,6 +242,21 @@ func track(_ title: String, album: String = "Album", artist: String = "Artist", 
     #expect(loup.album == "Les Belles Histoires" && loup.artist == "Histoires")
     #expect(loup.trackNumber == 1 && loup.trackCount == 3)
     #expect(content.folders.map(\.name) == ["Les Belles Histoires", "Comptines (Histoires)", "Comptines (Musique)"])
+    #expect(content.items.map(\.albumArtist) == ["Histoires", "Histoires", "Histoires", "Musique"])
+  }
+
+  @Test func albumWithSeveralArtistsIsVariousArtists() throws {
+    let lib = try MediaLibrary(root: dir.appendingPathComponent("Library"))
+    let folder = try lib.addFolder("Classiques", section: "Musique")
+    for (id, artist) in [("a", "Bernstein"), ("b", "Stanley Black"), ("c", "Bernstein")] {
+      let src = lib.scratchURL("mp3")
+      try silentMP3(frames: 40).write(to: src)
+      _ = try lib.insertTrack(id: id, folderID: folder.id, title: id, artist: artist, episode: nil, duration: nil,
+                              audio: src, cover: nil, source: .file, sourceID: nil, sourceName: nil)
+    }
+    let content = try IPodContent.build(library: lib, target: Self.target)
+    #expect(content.items.map(\.albumArtist) == Array(repeating: IPodContent.variousArtists, count: 3))
+    #expect(content.items.map(\.artist) == ["Bernstein", "Stanley Black", "Bernstein"])
   }
 
   @Test func transferThenUpdateThenRemove() throws {

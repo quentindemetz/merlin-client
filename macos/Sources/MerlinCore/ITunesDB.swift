@@ -262,6 +262,8 @@ public struct ITunesTrack: Equatable {
   public var title: String
   public var album: String
   public var artist: String
+  /// The artist the iPod files the album under; empty: the track's artist.
+  public var albumArtist: String
   public var genre: String
   public var trackNumber: Int
   public var trackCount: Int
@@ -273,11 +275,12 @@ public struct ITunesTrack: Equatable {
   public var ipodPath: String
   public var dbid: UInt64
 
-  public init(title: String, album: String, artist: String, genre: String, trackNumber: Int, trackCount: Int,
-              size: Int, durationMS: Int, bitrate: Int, sampleRate: Int, ipodPath: String, dbid: UInt64) {
+  public init(title: String, album: String, artist: String, albumArtist: String = "", genre: String, trackNumber: Int,
+              trackCount: Int, size: Int, durationMS: Int, bitrate: Int, sampleRate: Int, ipodPath: String, dbid: UInt64) {
     self.title = title
     self.album = album
     self.artist = artist
+    self.albumArtist = albumArtist
     self.genre = genre
     self.trackNumber = trackNumber
     self.trackCount = trackCount
@@ -487,7 +490,7 @@ public final class ITunesDB {
       var id = reusable.removeValue(forKey: t.dbid) ?? nextID
       if taken.contains(id) || added.contains(where: { $0.trackID == id }) { id = nextID }
       if id == nextID { nextID += 1 }
-      let atom = Self.track(t, id: id, albumID: albums.id(album: t.album, artist: t.artist),
+      let atom = Self.track(t, id: id, albumID: albums.id(album: t.album, artist: t.albumArtist.isEmpty ? t.artist : t.albumArtist),
                             artistID: artists.id(artist: t.artist), id0x24: id0x24, added: now,
                             previous: previous[t.dbid])
       added.append(atom)
@@ -505,21 +508,17 @@ public final class ITunesDB {
         let mhips = p.trackDBIDs.compactMap { byDBID[$0] }.enumerated().map { Self.item(trackID: $1, position: $0, time: now) }
         pls.children.append(Self.playlist(name: p.name, id: p.id, master: false, mhips: mhips))
       }
-      if let mpl = pls.children.first(where: \.isMaster) { rebuildMaster(mpl, removed: removedIDs, added: added, time: now) }
+      if let mpl = pls.children.first(where: \.isMaster) { rebuildMaster(mpl, time: now) }
     }
   }
 
   /// Every track belongs to the master playlist, which also carries the
   /// sorted indexes the iPod uses for its Songs/Artists/Albums menus
-  /// (mhod 52, jump tables in mhod 53).
-  private func rebuildMaster(_ mpl: Atom, removed: Set<UInt32>, added: [Atom], time: UInt32) {
-    var ids = mpl.children.filter { $0.tag == "mhip" }.map(\.itemTrackID).filter { !removed.contains($0) }
-    let existing = Set(trackList?.children.map(\.trackID) ?? [])
-    ids = ids.filter { existing.contains($0) }
-    ids += added.map(\.trackID).filter { !ids.contains($0) }
-
-    let tracksByID = Dictionary((trackList?.children ?? []).map { ($0.trackID, $0) }, uniquingKeysWith: { a, _ in a })
-    let members = ids.compactMap { tracksByID[$0] }
+  /// (mhod 52, jump tables in mhod 53). The iPod reads those indexes as
+  /// positions in the track list, so the master playlist must list the
+  /// tracks in exactly that order (as libgpod does).
+  private func rebuildMaster(_ mpl: Atom, time: UInt32) {
+    let members = trackList?.children ?? []
     let kept = mpl.children.filter { $0.tag == "mhod" && $0.type != MHOD.libraryIndex && $0.type != MHOD.jumpTable && !Self.isPositionMHOD($0) }
     var indexes: [Atom] = []
     if !members.isEmpty {
@@ -659,6 +658,7 @@ public final class ITunesDB {
     var mhods = [MHOD.string(MHOD.title, t.title)]
     if !t.artist.isEmpty { mhods.append(MHOD.string(MHOD.artist, t.artist)) }
     if !t.album.isEmpty { mhods.append(MHOD.string(MHOD.album, t.album)) }
+    if !t.albumArtist.isEmpty { mhods.append(MHOD.string(MHOD.albumArtist, t.albumArtist)) }
     mhods.append(MHOD.string(MHOD.filetype, "MPEG audio file"))
     mhods.append(MHOD.string(MHOD.path, t.ipodPath))
     if !t.genre.isEmpty { mhods.append(MHOD.string(MHOD.genre, t.genre)) }
@@ -843,7 +843,7 @@ private extension Optional where Wrapped == String {
 
 // MARK: - Album and artist lists
 
-/// mhla (albums, mhsd 4): one mhia per album/artist pair, referenced by
+/// mhla (albums, mhsd 4): one mhia per album/album artist pair, referenced by
 /// each track's album id. Existing entries are reused and kept as is.
 final class AlbumIndex {
   private let list: Atom?

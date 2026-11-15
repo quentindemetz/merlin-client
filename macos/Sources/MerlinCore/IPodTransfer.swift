@@ -3,13 +3,16 @@ import Foundation
 
 /// What goes on the iPod: the library's folders (except the ones left out
 /// for this iPod). A folder becomes an album and a playlist; tracks get
-/// their artist, or the folder's section.
+/// their artist, or the folder's section. The album is filed under one
+/// album artist (the tracks' common artist, else "Various Artists") so the
+/// iPod doesn't split it by performer.
 public struct IPodContent {
   public struct Item: Equatable {
     public let uuid: String
     public let title: String
     public let album: String
     public let artist: String
+    public var albumArtist = ""
     public let trackNumber: Int
     public let trackCount: Int
     public let source: URL
@@ -29,6 +32,7 @@ public struct IPodContent {
   public var missing: [String] = []
 
   public static let genre = "Merlin"
+  public static let variousArtists = "Various Artists"
 
   public init() {}
 
@@ -53,6 +57,8 @@ public struct IPodContent {
 
     for (folder, tracks) in synced {
       let folderCover = folder.cover.map(library.url).flatMap(nonEmpty)
+      let artists = Set(tracks.map { $0.artist ?? folder.section })
+      let albumArtist = artists.count == 1 ? artists.first! : variousArtists
       var uuids: [String] = []
       for (i, t) in tracks.enumerated() {
         guard let src = sendable.files[t.id].flatMap(nonEmpty) else {
@@ -61,6 +67,7 @@ public struct IPodContent {
         }
         var item = Item(uuid: t.id, title: t.title, album: folder.title, artist: t.artist ?? folder.section,
                         trackNumber: i + 1, trackCount: tracks.count, source: src)
+        item.albumArtist = albumArtist
         item.cover = t.cover.map(library.url).flatMap(nonEmpty) ?? folderCover
         content.items.append(item)
         uuids.append(t.id)
@@ -240,7 +247,8 @@ public final class IPodTransfer: @unchecked Sendable {
         continue
       }
       let dbid = previous?.dbid ?? ITunesDB.randomID()
-      tracks.append(ITunesTrack(title: item.title, album: item.album, artist: item.artist, genre: IPodContent.genre,
+      tracks.append(ITunesTrack(title: item.title, album: item.album, artist: item.artist,
+                                albumArtist: item.albumArtist, genre: IPodContent.genre,
                                 trackNumber: item.trackNumber, trackCount: item.trackCount, size: size,
                                 durationMS: facts.durationMS, bitrate: facts.bitrate, sampleRate: facts.sampleRate,
                                 ipodPath: path, dbid: dbid))
