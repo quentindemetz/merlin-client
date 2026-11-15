@@ -84,7 +84,7 @@ func track(_ title: String, album: String = "Album", artist: String = "Artist", 
     #expect(after.track(dbid: 7)?.bytes == owned)
     #expect(after.trackCount == 2)
     #expect(after.trackTitle(dbid: 101) == "Merlin 2 renamed")
-    #expect(after.trackID(dbid: 101) == before.trackID(dbid: 101)) // kept its id
+    #expect(after.trackID(dbid: 7) == 52 && after.trackID(dbid: 101) == 53) // renumbered in list order
     #expect(after.track(dbid: 100) == nil)
     #expect(after.playlistNames == ["Owner's list", "Merlin"])
     #expect(after.masterPlaylist?.children.filter { $0.tag == "mhip" }.count == 2)
@@ -108,6 +108,66 @@ func track(_ title: String, album: String = "Album", artist: String = "Artist", 
     })
     let positions = (0..<list.count).map { Int(Bytes.u32(titleIndex.payload, 48 + 4 * $0)) }
     #expect(positions.map { list[$0].string(MHOD.title) } == ["Alpha", "Bravo", "Charlie", "Owner"])
+  }
+
+  /// Like libgpod: ids from 52 in track-list order on every write, and the
+  /// owner's playlists follow their tracks to the new ids.
+  @Test func tracksAreRenumberedAndPlaylistsFollow() throws {
+    let db = ITunesDB(name: "iPod")
+    db.replace(tracks: [track("Merlin", dbid: 1)], removing: [], playlists: [], removingPlaylists: [])
+    db.replace(tracks: [track("Owner", dbid: 9)], removing: [],
+               playlists: [ITunesPlaylist(name: "Owner's list", id: 5, trackDBIDs: [9])], removingPlaylists: [])
+    #expect(db.trackID(dbid: 9) == 53)
+    db.replace(tracks: [], removing: [1], playlists: [], removingPlaylists: [])
+    let back = try roundTrip(db)
+    #expect(back.trackID(dbid: 9) == 52)
+    #expect(back.playlistTrackIDs(named: "Owner's list") == [52])
+  }
+
+  /// Album, artist and composer ids are recomputed from 1, and albums no
+  /// track uses any more go away.
+  @Test func albumAndArtistListsAreRebuilt() throws {
+    let db = ITunesDB(name: "iPod")
+    db.replace(tracks: [track("A", album: "Old", artist: "Gone", dbid: 1), track("B", album: "Kept", artist: "Lou", dbid: 2)],
+               removing: [], playlists: [], removingPlaylists: [])
+    db.replace(tracks: [], removing: [1], playlists: [], removingPlaylists: [])
+    let back = try roundTrip(db)
+    #expect(back.albumList?.children.map { $0.string(MHOD.albumAlbum) } == ["Kept"])
+    #expect(back.artistList?.children.map { $0.string(MHOD.artistName) } == ["Lou"])
+    let t = try #require(back.track(dbid: 2))
+    #expect(t.albumID == 1 && t.artistID == 1 && t.composerID == 0)
+  }
+
+  /// A database without an artist list (as recent iTunes writes for some
+  /// models), an old version and short track headers is brought to
+  /// libgpod's layout.
+  @Test func otherDatabasesAreUpgradedToLibgpodsLayout() throws {
+    let made = ITunesDB(name: "iPod")
+    made.replace(tracks: [track("Owner", album: "Mine", dbid: 9)], removing: [], playlists: [], removingPlaylists: [])
+    made.root.children.removeAll { $0.tag == "mhsd" && $0.type == 8 }
+    made.root.set32(20, UInt32(made.root.children.count))
+    made.root.set32(0x10, 0x75)
+    let owner = try #require(made.track(dbid: 9))
+    owner.header = Array(owner.header[0..<0xF4])
+    owner.set32(4, 0xF4)
+    let db = try ITunesDB(data: made.data())
+    #expect(db.artistList == nil)
+
+    db.replace(tracks: [track("Merlin", dbid: 1)], removing: [], playlists: [], removingPlaylists: [])
+    let back = try roundTrip(db)
+    #expect(back.root.u32(0x10) == ITunesDB.version)
+    #expect(back.artistList?.children.count == 1)
+    #expect(back.root.u32(20) == UInt32(back.root.children.count))
+    let t = try #require(back.track(dbid: 9))
+    #expect(t.header.count == 0x248 && t.u32(4) == 0x248)
+    #expect(t.albumID == 1 && t.u32(0x12C) == t.u32(0x24) && t.u32(0x16C) == 1)
+    #expect(back.trackString(dbid: 9, MHOD.album) == "Mine")
+  }
+
+  @Test func newDatabaseHasLibgpodsSections() {
+    let db = ITunesDB(name: "iPod")
+    #expect(db.root.children.map(\.type) == [1, 3, 2, 4, 8, 6, 10, 5])
+    #expect(db.root.u32(20) == 8)
   }
 
   @Test func albumArtistKeepsAnAlbumTogether() throws {

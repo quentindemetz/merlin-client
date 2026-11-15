@@ -5,9 +5,12 @@ import Foundation
 // libgpod (itdb_itunesdb.c, itdb_hash58.c) — the library Amarok uses for
 // iPods. Unlike libgpod, which rebuilds every record from its own model,
 // records we don't need to change (the owner's tracks, playlists, smart
-// playlists, albums...) are kept byte for byte: only Merlin's tracks and
-// playlists, the master playlist's indexes and the album/artist lists are
-// regenerated. That way nothing iTunes wrote and we don't understand is lost.
+// playlists...) are kept: only Merlin's tracks and playlists, the master
+// playlist and its indexes and the album/artist lists are regenerated. That
+// way nothing iTunes wrote and we don't understand is lost. What libgpod
+// recomputes on every write we recompute too: track ids (from 52, in
+// track-list order, with every playlist remapped), album/artist/composer
+// ids, the database version, and short track headers padded to its layout.
 //
 // Layout: little-endian chunks "mhXX" with a header length at +4 and either
 // a total length (records) or a child count (lists: mhlt, mhlp, mhla, mhli)
@@ -177,10 +180,12 @@ enum AtomParser {
 
 enum MHOD {
   static let title: UInt32 = 1, path: UInt32 = 2, album: UInt32 = 3, artist: UInt32 = 4, genre: UInt32 = 5
-  static let filetype: UInt32 = 6, composer: UInt32 = 12, albumArtist: UInt32 = 22
-  static let sortArtist: UInt32 = 23, sortTitle: UInt32 = 27, sortAlbum: UInt32 = 28, sortComposer: UInt32 = 30
+  static let filetype: UInt32 = 6, composer: UInt32 = 12, tvShow: UInt32 = 19, albumArtist: UInt32 = 22
+  static let sortArtist: UInt32 = 23, sortTitle: UInt32 = 27, sortAlbum: UInt32 = 28, sortAlbumArtist: UInt32 = 29
+  static let sortComposer: UInt32 = 30
   static let libraryIndex: UInt32 = 52, jumpTable: UInt32 = 53, playlist: UInt32 = 100
-  static let albumAlbum: UInt32 = 200, albumArtistName: UInt32 = 201, artistName: UInt32 = 300
+  static let albumAlbum: UInt32 = 200, albumArtistName: UInt32 = 201, albumSortArtist: UInt32 = 202
+  static let artistName: UInt32 = 300
 
   /// String types use a 16-byte sub-header: encoding (1 = UTF-16LE,
   /// 2 = UTF-8), byte length, two unknowns.
@@ -247,6 +252,7 @@ extension Atom {
   var discNumber: UInt32 { u32(0x5C) }
   var albumID: UInt32 { u32(0x120) }
   var artistID: UInt32 { u32(0x1E0) }
+  var composerID: UInt32 { u32(0x1F4) }
 
   // mhyp fields
   var isMaster: Bool { tag == "mhyp" && u8(20) == 1 }
@@ -325,7 +331,7 @@ public final class ITunesDB {
   public init(name: String) {
     var w = ByteWriter()
     w.tag("mhbd"); w.u32(244); w.u32(0); w.u32(1)
-    w.u32(0x30)        // version (iTunes 9.2), what libgpod writes for every model
+    w.u32(Self.version)
     w.u32(0)           // children, set below
     w.u64(Self.randomID())
     w.u16(1)           // platform: Mac
@@ -342,8 +348,10 @@ public final class ITunesDB {
     w.u16(0); w.u16(0); w.zeros32(11) // hash72
     w.zeros16(5); w.u8(0); w.u8(0); w.zeros32(14); w.zeros32(4)
     root = Atom(tag: "mhbd", header: w.bytes)
-    // Same order as libgpod: tracks, podcast playlists, playlists, albums, artists.
-    for (type, list) in [(1, "mhlt"), (3, "mhlp"), (2, "mhlp"), (4, "mhla"), (8, "mhli")] {
+    // Same sections and order as libgpod: tracks, podcast playlists,
+    // playlists, albums, artists, two empty track lists (6, 10) and the
+    // empty special playlists (5).
+    for (type, list) in [(1, "mhlt"), (3, "mhlp"), (2, "mhlp"), (4, "mhla"), (8, "mhli"), (6, "mhlt"), (10, "mhlt"), (5, "mhlp")] {
       root.children.append(Self.mhsd(UInt32(type), Self.list(list)))
     }
     Bytes.put32(&root.header, 20, UInt32(root.children.count))
@@ -467,49 +475,149 @@ public final class ITunesDB {
   public func replace(tracks newTracks: [ITunesTrack], removing remove: Set<UInt64>,
                       playlists newPlaylists: [ITunesPlaylist], removingPlaylists removePlaylists: Set<UInt64>) {
     guard let list = trackList else { return }
+    upgradeLayout()
     let id0x24 = root.u64(0x24)
     let now = macTime()
 
     // Old headers of the tracks being rewritten, for their play counts.
     var previous: [UInt64: Atom] = [:]
     for t in list.children where remove.contains(t.dbid) { previous[t.dbid] = t }
-    // A rewritten track keeps its id, so playlists pointing at it still do.
+    // A rewritten track keeps its id until the renumbering below, so
+    // playlists pointing at it follow it.
     let readded = Set(newTracks.map(\.dbid))
     let removedIDs = Set(previous.values.filter { !readded.contains($0.dbid) }.map(\.trackID))
     list.children.removeAll { remove.contains($0.dbid) }
     var reusable = Dictionary(previous.values.map { ($0.dbid, $0.trackID) }, uniquingKeysWith: { a, _ in a })
 
-    // Track ids: keep the existing ones (playlists point at them), number
-    // new tracks after the highest.
-    var nextID = max((list.children + Array(previous.values)).map(\.trackID).max() ?? 0, 51) + 1 // libgpod starts at 52
-    let albums = AlbumIndex(albumList), artists = ArtistIndex(artistList)
-
+    // Provisional ids for new tracks, after the highest.
+    var nextID = max((list.children + Array(previous.values)).map(\.trackID).max() ?? 0, Self.firstTrackID - 1) + 1
     let taken = Set(list.children.map(\.trackID))
     var added: [Atom] = []
     for t in newTracks {
       var id = reusable.removeValue(forKey: t.dbid) ?? nextID
       if taken.contains(id) || added.contains(where: { $0.trackID == id }) { id = nextID }
       if id == nextID { nextID += 1 }
-      let atom = Self.track(t, id: id, albumID: albums.id(album: t.album, artist: t.albumArtist.isEmpty ? t.artist : t.albumArtist),
-                            artistID: artists.id(artist: t.artist), id0x24: id0x24, added: now,
-                            previous: previous[t.dbid])
-      added.append(atom)
+      added.append(Self.track(t, id: id, id0x24: id0x24, added: now, previous: previous[t.dbid]))
     }
     list.children += added
-    albums.prune(keeping: list.children)
-    artists.prune(keeping: list.children)
+
+    // Drop the replaced playlists, and removed tracks from the others.
+    for pls in playlistLists {
+      pls.children.removeAll { !$0.isMaster && removePlaylists.contains($0.playlistID) }
+      for pl in pls.children where !pl.isMaster { Self.removeItems(of: removedIDs, from: pl) }
+    }
+    renumberTracks()
+    rebuildAlbumsAndArtists()
 
     let byDBID = Dictionary(list.children.map { ($0.dbid, $0.trackID) }, uniquingKeysWith: { a, _ in a })
     for pls in playlistLists {
-      // Drop the replaced playlists, and replaced tracks from the others.
-      pls.children.removeAll { !$0.isMaster && removePlaylists.contains($0.playlistID) }
-      for pl in pls.children where !pl.isMaster { Self.removeItems(of: removedIDs, from: pl) }
       for p in newPlaylists {
         let mhips = p.trackDBIDs.compactMap { byDBID[$0] }.enumerated().map { Self.item(trackID: $1, position: $0, time: now) }
         pls.children.append(Self.playlist(name: p.name, id: p.id, master: false, mhips: mhips))
       }
       if let mpl = pls.children.first(where: \.isMaster) { rebuildMaster(mpl, time: now) }
     }
+  }
+
+  static let version: UInt32 = 0x30 // iTunes 9.2, what libgpod writes for every model
+  static let firstTrackID: UInt32 = 52 // libgpod's FIRST_IPOD_ID
+  static let trackHeaderLength = 0x248
+
+  /// Brings a database another program wrote to the layout libgpod writes:
+  /// its version, album and artist lists present, and track headers at
+  /// least as long as libgpod's (shorter ones lack the album/artist ids).
+  func upgradeLayout() {
+    root.set32(0x10, Self.version)
+    if section(4) == nil {
+      let at = root.children.firstIndex { $0.tag == "mhsd" && $0.type == 1 }.map { $0 + 1 } ?? root.children.count
+      root.children.insert(Self.mhsd(4, Self.list("mhla")), at: at)
+    }
+    if section(8) == nil {
+      let at = root.children.firstIndex { $0.tag == "mhsd" && $0.type == 4 }.map { $0 + 1 } ?? root.children.count
+      root.children.insert(Self.mhsd(8, Self.list("mhli")), at: at)
+    }
+    root.set32(20, UInt32(root.children.count))
+    let id0x24 = root.u64(0x24)
+    for t in trackList?.children ?? [] where t.header.count < Self.trackHeaderLength {
+      let old = t.header.count
+      t.header += [UInt8](repeating: 0, count: Self.trackHeaderLength - old)
+      t.set32(4, UInt32(Self.trackHeaderLength))
+      // The fixed values libgpod's mk_mhit puts past the old end.
+      if old <= 0x124 { t.set64(0x124, id0x24) }
+      if old <= 0x12C { t.set32(0x12C, t.u32(0x24)) }
+      if old <= 0x134 { t.set64(0x134, 0x8080_8080_8080) }
+      if old <= 0x16C { t.set32(0x16C, 1) }
+    }
+  }
+
+  /// Numbers the tracks from 52 in track-list order, as libgpod does on
+  /// every write, and points every playlist item at the new ids. Items
+  /// pointing at no track are dropped.
+  private func renumberTracks() {
+    guard let list = trackList else { return }
+    var map: [UInt32: UInt32] = [:]
+    for (i, t) in list.children.enumerated() {
+      let id = Self.firstTrackID + UInt32(i)
+      map[t.trackID] = id
+      t.set32(0x10, id)
+    }
+    let lists = root.children.filter { $0.tag == "mhsd" }.compactMap { $0.children.first { $0.tag == "mhlp" } }
+    for pl in lists.flatMap(\.children) where pl.tag == "mhyp" {
+      // Podcast group headers (flag at +16) point at no track.
+      let items = pl.children.filter { $0.tag == "mhip" && $0.u32(16) == 0 }
+      Self.removeItems(of: Set(items.map(\.itemTrackID).filter { map[$0] == nil }), from: pl)
+      for item in pl.children where item.tag == "mhip" && item.u32(16) == 0 {
+        if let id = map[item.itemTrackID] { item.set32(24, id) }
+      }
+    }
+  }
+
+  /// Rebuilds the album list (mhla) and artist list (mhli) from the tracks
+  /// and sets each track's album, artist and composer ids, numbered from 1
+  /// in track-list order like libgpod's prepare_itdb_for_write.
+  private func rebuildAlbumsAndArtists() {
+    guard let tracks = trackList?.children else { return }
+    var albumIDs: [String: UInt32] = [:], artistIDs: [String: UInt32] = [:], composerIDs: [String: UInt32] = [:]
+    var albums: [Atom] = [], artists: [Atom] = []
+    for t in tracks where t.header.count >= 0x1F8 {
+      let artist = t.string(MHOD.artist).nonEmpty
+      var albumID: UInt32 = 0
+      if let album = t.string(MHOD.album).nonEmpty {
+        // Same album: same name and TV show, and same album artist (else artist).
+        let by = t.string(MHOD.albumArtist).nonEmpty ?? artist
+        let key = [album, t.string(MHOD.tvShow) ?? "", by ?? ""].joined(separator: "\u{0}")
+        if let id = albumIDs[key] {
+          albumID = id
+        } else {
+          albumID = UInt32(albums.count + 1)
+          albumIDs[key] = albumID
+          let sortBy = t.string(MHOD.sortAlbumArtist).nonEmpty ?? t.string(MHOD.sortArtist).nonEmpty
+          albums.append(Self.albumItem(id: albumID, album: album, artist: by, sortArtist: sortBy))
+        }
+      }
+      t.set32(0x120, albumID)
+
+      var artistID: UInt32 = 0
+      if let artist {
+        if let id = artistIDs[artist] {
+          artistID = id
+        } else {
+          artistID = UInt32(artists.count + 1)
+          artistIDs[artist] = artistID
+          artists.append(Self.artistItem(id: artistID, artist: artist))
+        }
+      }
+      t.set32(0x1E0, artistID)
+
+      var composerID: UInt32 = 0
+      if let composer = t.string(MHOD.composer).nonEmpty {
+        composerID = composerIDs[composer] ?? UInt32(composerIDs.count + 1)
+        composerIDs[composer] = composerID
+      }
+      t.set32(0x1F4, composerID)
+    }
+    albumList?.children = albums
+    artistList?.children = artists
   }
 
   /// Every track belongs to the master playlist, which also carries the
@@ -584,8 +692,8 @@ public final class ITunesDB {
   }
 
   /// mk_mhit, for an MP3 (0x248-byte header as written for every model).
-  static func track(_ t: ITunesTrack, id: UInt32, albumID: UInt32, artistID: UInt32, id0x24: UInt64,
-                    added: UInt32, previous: Atom?) -> Atom {
+  /// Album, artist and composer ids are set by rebuildAlbumsAndArtists.
+  static func track(_ t: ITunesTrack, id: UInt32, id0x24: UInt64, added: UInt32, previous: Atom?) -> Atom {
     var w = ByteWriter()
     w.tag("mhit"); w.u32(0x248); w.u32(0); w.u32(0)
     w.u32(id)
@@ -641,7 +749,7 @@ public final class ITunesDB {
     w.zeros32(9)                                // 0xDC..0xFF
     w.u16(0); w.u16(0)                          // gapless flags
     w.zeros32(7)
-    w.u32(albumID)                              // 0x120
+    w.u32(0)                                    // 0x120 album id
     w.u64(id0x24)
     w.u32(UInt32(clamping: t.size))
     w.u32(0); w.u64(0x808080808080); w.u32(0)
@@ -649,7 +757,7 @@ public final class ITunesDB {
     w.u32(0)                                    // 0x160 mhii link (artwork)
     w.u32(0); w.u32(1); w.u32(0)
     w.zeros32(28)
-    w.u32(artistID)                             // 0x1E0
+    w.u32(0)                                    // 0x1E0 artist id
     w.zeros32(4)
     w.u32(0)                                    // 0x1F4 composer id
     w.zeros32(20)
@@ -843,76 +951,24 @@ private extension Optional where Wrapped == String {
 
 // MARK: - Album and artist lists
 
-/// mhla (albums, mhsd 4): one mhia per album/album artist pair, referenced by
-/// each track's album id. Existing entries are reused and kept as is.
-final class AlbumIndex {
-  private let list: Atom?
-  private var next: UInt32
-  private var byKey: [String: UInt32] = [:]
-
-  init(_ list: Atom?) {
-    self.list = list
-    next = (list?.children.map(\.itemID).max() ?? 0) + 1
-    for a in list?.children ?? [] {
-      byKey[Self.key(a.string(MHOD.albumAlbum) ?? "", a.string(MHOD.albumArtistName) ?? "")] = a.itemID
-    }
-  }
-
-  static func key(_ album: String, _ artist: String) -> String { album + "\u{0}" + artist }
-
-  func id(album: String, artist: String) -> UInt32 {
-    guard let list else { return 0 }
-    if let id = byKey[Self.key(album, artist)] { return id }
-    let id = next
-    next += 1
-    byKey[Self.key(album, artist)] = id
+extension ITunesDB {
+  /// mk_mhia: one album of the mhla (mhsd 4), referenced at mhit+0x120.
+  static func albumItem(id: UInt32, album: String, artist: String?, sortArtist: String?) -> Atom {
     var w = ByteWriter()
-    w.tag("mhia"); w.u32(88); w.u32(0); w.u32(0); w.u32(id); w.u64(ITunesDB.randomID()); w.u32(2); w.zeros32(14)
-    var mhods: [Atom] = []
-    if !album.isEmpty { mhods.append(MHOD.string(MHOD.albumAlbum, album)) }
-    if !artist.isEmpty { mhods.append(MHOD.string(MHOD.albumArtistName, artist)) }
+    w.tag("mhia"); w.u32(88); w.u32(0); w.u32(0); w.u32(id); w.u64(randomID()); w.u32(2); w.zeros32(14)
+    var mhods = [MHOD.string(MHOD.albumAlbum, album)]
+    if let artist { mhods.append(MHOD.string(MHOD.albumArtistName, artist)) }
+    if let sortArtist { mhods.append(MHOD.string(MHOD.albumSortArtist, sortArtist)) }
     let atom = Atom(tag: "mhia", header: w.bytes, children: mhods)
     atom.set32(12, UInt32(mhods.count))
-    list.children.append(atom)
-    return id
+    return atom
   }
 
-  /// Drops albums no track points to any more (only Merlin's can go away).
-  func prune(keeping tracks: [Atom]) {
-    guard let list, tracks.allSatisfy({ $0.header.count >= 0x124 }) else { return }
-    let used = Set(tracks.map(\.albumID))
-    list.children.removeAll { !used.contains($0.itemID) }
-  }
-}
-
-/// mhli (artists, mhsd 8): one mhii per artist, referenced at mhit+0x1E0.
-final class ArtistIndex {
-  private let list: Atom?
-  private var next: UInt32
-  private var byName: [String: UInt32] = [:]
-
-  init(_ list: Atom?) {
-    self.list = list
-    next = (list?.children.map(\.itemID).max() ?? 0) + 1
-    for a in list?.children ?? [] { byName[a.string(MHOD.artistName) ?? ""] = a.itemID }
-  }
-
-  func id(artist: String) -> UInt32 {
-    guard let list, !artist.isEmpty else { return 0 }
-    if let id = byName[artist] { return id }
-    let id = next
-    next += 1
-    byName[artist] = id
+  /// mk_mhii: one artist of the mhli (mhsd 8), referenced at mhit+0x1E0.
+  static func artistItem(id: UInt32, artist: String) -> Atom {
     var w = ByteWriter()
-    w.tag("mhii"); w.u32(80); w.u32(0); w.u32(1); w.u32(id); w.u64(ITunesDB.randomID()); w.u32(2); w.zeros32(12)
-    list.children.append(Atom(tag: "mhii", header: w.bytes, children: [MHOD.string(MHOD.artistName, artist)]))
-    return id
-  }
-
-  func prune(keeping tracks: [Atom]) {
-    guard let list, tracks.allSatisfy({ $0.header.count >= 0x1E4 }) else { return }
-    let used = Set(tracks.map(\.artistID))
-    list.children.removeAll { !used.contains($0.itemID) }
+    w.tag("mhii"); w.u32(80); w.u32(0); w.u32(1); w.u32(id); w.u64(randomID()); w.u32(2); w.zeros32(12)
+    return Atom(tag: "mhii", header: w.bytes, children: [MHOD.string(MHOD.artistName, artist)])
   }
 }
 
