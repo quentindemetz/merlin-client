@@ -33,7 +33,7 @@ struct SyncView: View {
           .fixedSize(horizontal: false, vertical: true)
 
         if let id = app.settingID {
-          SyncSelection(target: SpeakerPlaylist.target(id))
+          SyncSelection(target: SpeakerPlaylist.target(id), capacity: app.speakerCards[id])
         }
 
         GroupBox {
@@ -112,6 +112,16 @@ struct SessionView: View {
   }
 
   private var header: some View {
+    VStack(spacing: 0) {
+      statusRow
+      if let p = session.progress, session.isRunning {
+        TransferProgress(progress: p)
+          .padding([.horizontal, .bottom])
+      }
+    }
+  }
+
+  private var statusRow: some View {
     HStack(spacing: 12) {
       Group {
         switch session.state {
@@ -150,6 +160,53 @@ struct SessionView: View {
     case .failed: return "Transfer failed"
     case .aborted: return "Transfer aborted"
     }
+  }
+}
+
+/// Bar under the session header: files and bytes sent, and time left.
+struct TransferProgress: View {
+  let progress: SyncProgress
+
+  private static let remaining: DateComponentsFormatter = {
+    let f = DateComponentsFormatter()
+    f.unitsStyle = .abbreviated
+    f.allowedUnits = [.hour, .minute, .second]
+    f.maximumUnitCount = 2
+    return f
+  }()
+
+  var body: some View {
+    VStack(alignment: .leading, spacing: 4) {
+      ProgressView(value: min(max(progress.fraction, 0), 1))
+      HStack {
+        Text(detail).monospacedDigit()
+        Spacer()
+        Text(timeLeft).monospacedDigit()
+      }
+      .font(.caption)
+      .foregroundStyle(.secondary)
+      if let current = progress.current {
+        Text(current).font(.caption2).foregroundStyle(.tertiary).lineLimit(1).truncationMode(.middle)
+      }
+    }
+  }
+
+  private var detail: String {
+    let files = "\(progress.filesDone) of \(progress.filesTotal) files"
+    switch progress.phase {
+    case .checking: return "Checking what's on the speaker · \(files)"
+    case .uploading:
+      let done = ByteCountFormatter.string(fromByteCount: Int64(progress.bytesDone), countStyle: .file)
+      let total = ByteCountFormatter.string(fromByteCount: Int64(progress.bytesTotal), countStyle: .file)
+      return "\(files) · \(done) of \(total)"
+    }
+  }
+
+  private var timeLeft: String {
+    guard progress.phase == .uploading else { return "" }
+    if progress.bytesDone >= progress.bytesTotal { return "Applying the playlist…" }
+    guard let eta = progress.secondsLeft, eta.isFinite, let text = Self.remaining.string(from: max(eta.rounded(), 1)) else { return "Estimating time left…" }
+    return "About \(text) left"
   }
 }
 

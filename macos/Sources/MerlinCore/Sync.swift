@@ -33,6 +33,7 @@ public final class Sync: @unchecked Sendable {
   private let isolation: TrafficFilter?
   private let content: SpeakerPlanContent?
   private let onTransferEnd: ((Report) -> Void)?
+  private let onProgress: ((SyncProgress) -> Void)?
   private let timing: Timing
   private var cancel: CancelToken? { speakerOptions.cancel }
 
@@ -41,14 +42,19 @@ public final class Sync: @unchecked Sendable {
   private var linkDown = true
   private var connectedOnce = false
   private var speakerSSID: String?
+  private var reconnects = 0
+  private var estimator = TransferEstimator()
 
   /// content: what the speaker gets instead of the server's playlist (the
   /// library); nil keeps the plan as Merlin sent it.
   /// onTransferEnd: called once the speaker part is over (success or
   /// failure), before reconnecting and reporting to Merlin.
+  /// onProgress: called from the sync thread while files go to the speaker
+  /// (often: once per chunk sent).
   public init(backend: SyncBackend, cacheDir: URL, wifi: SyncWifi, speaker: SpeakerOptions, out: SyncOutput,
               isolation: TrafficFilter? = nil, content: SpeakerPlanContent? = nil,
-              onTransferEnd: ((Report) -> Void)? = nil, timing: Timing = Timing()) {
+              onTransferEnd: ((Report) -> Void)? = nil, onProgress: ((SyncProgress) -> Void)? = nil,
+              timing: Timing = Timing()) {
     self.backend = backend
     self.cacheDir = cacheDir
     self.wifi = wifi
@@ -57,6 +63,7 @@ public final class Sync: @unchecked Sendable {
     self.isolation = isolation
     self.content = content
     self.onTransferEnd = onTransferEnd
+    self.onProgress = onProgress
     self.timing = timing
   }
 
@@ -212,17 +219,21 @@ public final class Sync: @unchecked Sendable {
         throw SyncFailure("510_FAILED_ON_SDK_ESTABLISH_CONNEXION", "speaker not reachable at \(host):\(port): \(e.message)")
       }
       log("Connect to speaker succeed")
-      try onSpeaker("read speaker info") { try readInfo($0, &report) }
+      let info = try onSpeaker("read speaker info") { try readInfo($0, &report) }
 
       let images = files.filter { $0.str("type") == "image" } // images first, like the app
       let audios = files.filter { $0.str("type") == "audio" }
-      var added = try uploadAll(images, kind: "image")
-      added += try uploadAll(audios, kind: "audio")
+      let name = playlist.lastPathComponent
+      let playlistData = try Data(contentsOf: playlist)
+      try checkSpace(images + audios, extra: playlistData.count, info)
+
+      var progress = SyncProgress(phase: .uploading, filesTotal: images.count + audios.count,
+                                  bytesTotal: (images + audios).reduce(0) { $0 + localSize($1) })
+      var added = try uploadAll(images, kind: "image", &progress)
+      added += try uploadAll(audios, kind: "audio", &progress)
       if report.str("type") == "TRANSFERT" { report["device_content_added"] = audios.count }
       say("  \(added) file(s) uploaded, \(files.count - added) already on the speaker")
 
-      let name = playlist.lastPathComponent
-      let playlistData = try Data(contentsOf: playlist)
       try onSpeaker("upload \(name)") { _ = try $0.syncFile(name, playlistData) }
       log("Upload playlist file on speaker succeed")
       say("Applying playlist (the speaker rebuilds its library; this can take a while)...")
@@ -304,6 +315,7 @@ public final class Sync: @unchecked Sendable {
       speaker = try connectWithRetry(timeout: timing.linkWindow)
       try speaker!.ping(timeout: min(speakerOptions.ackTimeout, 3))
       if connectedOnce {
+        reconnects += 1
         log("Reconnected to the speaker")
         trace("reconnected — \(networkSnapshot())")
       }
@@ -340,26 +352,84 @@ public final class Sync: @unchecked Sendable {
     return "mac wifi ip=\(ip ?? "none") default gw=\(gw.map(String.init) ?? "none")"
   }
 
-  private func readInfo(_ s: Speaker, _ report: inout Report) throws {
+  private func readInfo(_ s: Speaker, _ report: inout Report) throws -> SpeakerInfo {
     let i = try s.info()
     say("Speaker: firmware \(i.firmwareVersion), battery \(i.batteryLevel)%\(i.charging ? " (charging)" : ""), \(i.availableSpace)/\(i.totalSize) free")
     report["firmware_version"] = i.firmwareVersion
     report["sd_size"] = Int(i.totalSize)
     report["available_size"] = Int(i.availableSpace)
     report["mac_address"] = i.macAddress
+    return i
   }
 
-  private func uploadAll(_ files: [JSONObject], kind: String) throws -> Int {
+  private func localSize(_ f: JSONObject) -> Int { fileSize(URL(fileURLWithPath: f.str("path") ?? "")) }
+
+  /// Refuses, before uploading anything, a transfer the speaker can't hold —
+  /// rather than failing on NOT_ENOUGH_SPACE after a long upload. Files the
+  /// speaker no longer needs are only dropped once the new playlist is
+  /// applied, i.e. after the uploads, so they still count as used here.
+  private func checkSpace(_ files: [JSONObject], extra: Int, _ info: SpeakerInfo) throws {
+    let total = files.reduce(extra) { $0 + localSize($1) }
+    let free = Int(info.availableSpace), card = Int(info.totalSize)
+    func fmt(_ n: Int) -> String { ByteCountFormatter.string(fromByteCount: Int64(n), countStyle: .file) }
+    if total > card {
+      throw SyncFailure("502_FAILED_ON_SDK_UPLOAD_FILE",
+                        "the selection (\(fmt(total))) is larger than the speaker's whole card (\(fmt(card))): uncheck some folders")
+    }
+    guard total > free else { return }
+    // Doesn't obviously fit: see what's already there (by name — cheap, the
+    // speaker doesn't hash anything).
+    say("Checking what's already on the speaker (\(fmt(total)) to send, \(fmt(free)) free)...")
+    var progress = SyncProgress(phase: .checking, filesTotal: files.count)
+    var needed = extra
+    for f in files {
+      let filename = ((f.str("filename") ?? "") as NSString).lastPathComponent
+      progress.current = filename
+      onProgress?(progress)
+      let remote = try onSpeaker("check \(filename)") { try $0.searchFile(filename, verify: false) }
+      // A different version already there gets replaced: only the growth counts.
+      needed += max(0, localSize(f) - (remote.found ? Int(remote.size ?? 0) : 0))
+      progress.filesDone += 1
+    }
+    onProgress?(progress)
+    if needed > free {
+      throw SyncFailure("502_FAILED_ON_SDK_UPLOAD_FILE",
+                        "not enough space on the speaker: \(fmt(needed)) to upload, \(fmt(free)) free (\(fmt(card)) card). "
+                          + "What it no longer needs is only removed after the transfer: uncheck some folders")
+    }
+    log("Space check: \(needed) B to upload, \(free) B free")
+  }
+
+  private func uploadAll(_ files: [JSONObject], kind: String, _ progress: inout SyncProgress) throws -> Int {
     var added = 0
     for (i, f) in files.enumerated() {
       let filename = f.str("filename") ?? ""
       let label = "  [\(kind) \(i + 1)/\(files.count)] \(filename)"
       let data = try Data(contentsOf: URL(fileURLWithPath: f.str("path") ?? ""))
+      progress.current = (filename as NSString).lastPathComponent
+      onProgress?(progress)
+      let before = progress
+      let started = Date(), reconnectsBefore = reconnects
       let result = try onSpeaker("\(kind) \(i + 1)/\(files.count) \(filename)") { s in
         try s.syncFile((filename as NSString).lastPathComponent, data) { sent, total in
           self.out.print("\r\(label) \(sent * 100 / max(total, 1))%")
+          var p = before
+          p.bytesDone += sent
+          // Bytes are flowing: this file's fixed cost is (mostly) behind it.
+          if self.estimator.samples > 0 {
+            p.secondsLeft = self.estimator.secondsLeft(files: p.filesTotal - p.filesDone - 1, bytes: p.bytesTotal - p.bytesDone)
+          }
+          self.onProgress?(p)
         }
       }
+      // Time lost reconnecting says nothing about the pace.
+      if reconnects == reconnectsBefore { estimator.record(bytes: data.count, seconds: Date().timeIntervalSince(started)) }
+      progress = before
+      progress.filesDone += 1
+      progress.bytesDone += data.count
+      progress.secondsLeft = estimator.secondsLeft(files: progress.filesTotal - progress.filesDone,
+                                                   bytes: progress.bytesTotal - progress.bytesDone)
+      onProgress?(progress)
       let outcome = result == .uploaded ? "uploaded" : "already present"
       out.print("\r\(label) \(outcome)\n")
       log("\(label.trimmingCharacters(in: .whitespaces)) (\(data.count) B) \(outcome)") // lands in the report
@@ -453,6 +523,33 @@ public final class Sync: @unchecked Sendable {
   private func say(_ msg: String) {
     out.print(msg + "\n")
     log(msg)
+  }
+}
+
+/// Where the transfer to the speaker stands.
+public struct SyncProgress: Equatable, Sendable {
+  public enum Phase: Equatable, Sendable {
+    /// Looking up which files the speaker already has (space check).
+    case checking
+    case uploading
+  }
+
+  public var phase: Phase
+  public var filesDone = 0
+  public var filesTotal = 0
+  /// Bytes of the files done so far, plus what was sent of the current one.
+  public var bytesDone = 0
+  public var bytesTotal = 0
+  /// The file being handled.
+  public var current: String?
+  /// Estimated time left for the uploads (per-file overhead + throughput),
+  /// once at least one file is done.
+  public var secondsLeft: Double?
+
+  public var fraction: Double {
+    phase == .checking || bytesTotal == 0
+      ? Double(filesDone) / Double(max(filesTotal, 1))
+      : Double(bytesDone) / Double(bytesTotal)
   }
 }
 

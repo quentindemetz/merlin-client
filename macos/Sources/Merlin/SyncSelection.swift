@@ -4,7 +4,7 @@ import SwiftUI
 /// Which library folders a device gets (all of them unless unchecked).
 struct SyncSelection: View {
   let target: String
-  /// Free space on the device, when known.
+  /// What the device holds at most (its card size), when known.
   var capacity: Int64?
   @Environment(AppModel.self) private var app
 
@@ -23,7 +23,8 @@ struct SyncSelection: View {
             Text("\(tracks) track(s) in \(chosen.count) folder(s) · \(ByteCountFormatter.string(fromByteCount: Int64(size), countStyle: .file))")
               .bold()
             if let capacity, Int64(size) > capacity {
-              Text("— more than the free space").foregroundStyle(.red)
+              Text("— more than the device holds (\(ByteCountFormatter.string(fromByteCount: capacity, countStyle: .file)))")
+                .foregroundStyle(.red)
             }
             Spacer()
             Button("All") { app.edit("Selection") { try $0.setIncluded(true, folders: folders.map(\.id), target: target) } }

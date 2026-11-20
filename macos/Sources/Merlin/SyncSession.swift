@@ -23,6 +23,8 @@ final class SyncSession {
   private(set) var homeSSID: String?
   private(set) var errorMessage: String?
   private(set) var aborting = false
+  /// Where the transfer to the speaker stands, once it has started.
+  private(set) var progress: SyncProgress?
 
   @ObservationIgnored let log = SyncLog()
   @ObservationIgnored private let cancel = CancelToken()
@@ -31,6 +33,7 @@ final class SyncSession {
   @ObservationIgnored private weak var app: AppModel?
   @ObservationIgnored private var sync: Sync!
   @ObservationIgnored private let isolation: Isolation?
+  @ObservationIgnored private let latest = LatestProgress()
 
   var isRunning: Bool { state == .running }
   var isFinished: Bool { !isRunning }
@@ -43,6 +46,8 @@ final class SyncSession {
     let log = log
     let cancel = cancel
     let speakerLog = app.speakerLog
+    let latest = latest
+    let settingID = app.settingID
     let wifi = SessionWifi(network: app.network, log: log, cancel: cancel)
     isolation?.out = { log.line($0) }
     sync = Sync(
@@ -56,9 +61,16 @@ final class SyncSession {
         }
       },
       onTransferEnd: { [weak self] report in
+        if let settingID, case let card = report.int("sd_size"), card > 0 {
+          DispatchQueue.main.async { self?.app?.rememberSpeakerCard(settingID, size: Int64(card)) }
+        }
         let outcome: State = report.str("status") == "SUCCESS" ? .done
           : (report.str("status_code") ?? "").hasPrefix("800") ? .aborted : .failed
         DispatchQueue.main.async { self?.finishSpeakerPart(outcome) }
+      },
+      onProgress: { [weak self] p in
+        latest.set(p)
+        DispatchQueue.main.async { self?.scheduleRefresh() }
       }
     )
     wifi.onChange = { [weak self] waiting, home in
@@ -129,7 +141,19 @@ final class SyncSession {
     }
   }
 
-  private func refresh() { lines = log.lines }
+  private func refresh() {
+    lines = log.lines
+    guard let p = latest.get(), p != progress else { return }
+    progress = p
+  }
+}
+
+/// The sync thread's latest progress, picked up by the main thread.
+private final class LatestProgress: @unchecked Sendable {
+  private let lock = NSLock()
+  private var value: SyncProgress?
+  func set(_ p: SyncProgress) { lock.withLock { value = p } }
+  func get() -> SyncProgress? { lock.withLock { value } }
 }
 
 /// Wi-Fi switching for the app: the core's automatic switching, plus what

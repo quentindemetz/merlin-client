@@ -31,6 +31,8 @@ final class FakeSpeaker: @unchecked Sendable {
   var silentPings: Set<Int> = []
   /// After a silent upload, this many new connections are accepted then reset.
   var resetAfterDrop = 0
+  var availableSpace: UInt32 = 1_000_000
+  var totalSize: UInt32 = 8_000_000
 
   var files: [String: [UInt8]] { lock.withLock { _files } }
   var commands: [UInt8] { lock.withLock { _commands } }
@@ -39,6 +41,8 @@ final class FakeSpeaker: @unchecked Sendable {
   var hours: [UInt8]? { lock.withLock { _hours } }
   var wifi: (String, String)? { lock.withLock { _wifi } }
   var date: UInt32? { lock.withLock { _date } }
+
+  func put(_ name: String, _ data: [UInt8]) { lock.withLock { _files[name] = data } }
 
   func file(_ name: String) -> String? { files[name].map { String(decoding: $0, as: UTF8.self) } }
 
@@ -123,8 +127,8 @@ final class FakeSpeaker: @unchecked Sendable {
       let n = lock.withLock { pings += 1; return pings }
       if !silentPings.contains(n) { reply(sock, frame.cmd, []) }
     case Cmd.endSynchronization, Cmd.reset: reply(sock, frame.cmd, [])
-    case Cmd.availableSpace: reply(sock, frame.cmd, le32(1_000_000))
-    case Cmd.totalSize: reply(sock, frame.cmd, le32(8_000_000))
+    case Cmd.availableSpace: reply(sock, frame.cmd, le32(availableSpace))
+    case Cmd.totalSize: reply(sock, frame.cmd, le32(totalSize))
     case Cmd.firmwareVersion: reply(sock, frame.cmd, [1, 4, 27, 0])
     case Cmd.batteryState: reply(sock, frame.cmd, [87, 1])
     case Cmd.macAddress: reply(sock, frame.cmd, [0xAA, 0xBB, 0xCC, 1, 2, 3])

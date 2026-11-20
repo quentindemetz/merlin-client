@@ -32,6 +32,8 @@ final class AppModel {
   var loggedIn: Bool
   var speakers: [Speaker] = []
   var settingID: String?
+  /// Card size of each speaker (by setting id), as read at its last sync.
+  private(set) var speakerCards: [String: Int64] = [:]
   var status: StatusMessage?
   var locationStatus: LocationPermission.Status = .undetermined
 
@@ -95,6 +97,7 @@ final class AppModel {
     speakerLog = SpeakerLog(dir: config.logDir)
     loggedIn = backend.isLoggedIn
     settingID = config.settingID
+    speakerCards = (config.settings.obj("speaker_cards") ?? [:]).compactMapValues { ($0 as? NSNumber)?.int64Value }
     locationStatus = location.status
     tasks = LibraryTasks(app: self)
     backup = BackupModel(app: self)
@@ -331,6 +334,12 @@ final class AppModel {
     let session = SyncSession(app: self, isolation: isolate ? isolation : nil)
     syncSession = session
     session.start()
+  }
+
+  func rememberSpeakerCard(_ settingID: String, size: Int64) {
+    guard speakerCards[settingID] != size else { return }
+    speakerCards[settingID] = size
+    config.saveSettings(["speaker_cards": speakerCards.mapValues { NSNumber(value: $0) }])
   }
 
   func syncEnded() {

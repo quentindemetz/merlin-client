@@ -149,10 +149,11 @@ final class SyncTests {
 
   func sync(out: Captured = Captured(), ackTimeout: Double = Speaker.ackTimeout, port: Int? = nil, logger: ((String) -> Void)? = nil,
             wifi: SyncWifi? = nil, isolation: TrafficFilter? = nil, content: SpeakerPlanContent? = nil,
-            onTransferEnd: ((JSONObject) -> Void)? = nil, timing: Sync.Timing = SyncTests.fast) -> Sync {
+            onTransferEnd: ((JSONObject) -> Void)? = nil, onProgress: ((SyncProgress) -> Void)? = nil,
+            timing: Sync.Timing = SyncTests.fast) -> Sync {
     Sync(backend: backend, cacheDir: dir, wifi: wifi ?? NoWifi(net),
          speaker: SpeakerOptions(host: "127.0.0.1", port: port ?? fake.port, logger: logger, ackTimeout: ackTimeout),
-         out: out, isolation: isolation, content: content, onTransferEnd: onTransferEnd, timing: timing)
+         out: out, isolation: isolation, content: content, onTransferEnd: onTransferEnd, onProgress: onProgress, timing: timing)
   }
 
   var lastReport: JSONObject { backend.reports.last?.1 ?? [:] }
@@ -346,6 +347,76 @@ final class SyncTests {
     backend.plan["playlistText"] = nil
     #expect(throws: SyncFailure.self) { try sync().run() }
     #expect(lastReport.str("status_code") == "203_FAILED_ON_PREPARE_CONTENT_PLAYLIST")
+  }
+
+  var uploads: Int { fake.commands.filter { $0 == WireProtocol.Cmd.uploadFile }.count }
+
+  @Test func selectionLargerThanTheCardFailsBeforeUploading() {
+    fake.totalSize = 200_000
+    let error = #expect(throws: SyncFailure.self) { try sync().run() }
+    #expect(error?.code == "502_FAILED_ON_SDK_UPLOAD_FILE")
+    #expect(error?.message.contains("whole card") == true)
+    #expect(uploads == 0)
+    #expect(lastReport.str("status") == "FAIL")
+  }
+
+  @Test func notEnoughFreeSpaceFailsBeforeUploading() {
+    fake.availableSpace = 100_000
+    let error = #expect(throws: SyncFailure.self) { try sync().run() }
+    #expect(error?.message.contains("not enough space") == true)
+    #expect(uploads == 0)
+  }
+
+  /// Files already on the speaker don't need room.
+  @Test func filesAlreadyThereDontCountAgainstFreeSpace() throws {
+    fake.availableSpace = 100_000
+    fake.put("a1.mp3", [UInt8](audio))
+    try sync().run()
+    #expect(lastReport.str("status") == "SUCCESS")
+    #expect(fake.file("u1.jpg") == "JPEGDATA")
+  }
+
+  @Test func progressCoversEveryByte() throws {
+    let seen = Locked<[SyncProgress]>([])
+    try sync(onProgress: { p in seen.mutate { $0.append(p) } }).run()
+    let all = seen.value
+    let last = try #require(all.last)
+    #expect(last.phase == .uploading)
+    #expect(last.filesDone == 2 && last.filesTotal == 2)
+    #expect(last.bytesTotal == audio.count + 8)
+    #expect(last.bytesDone == last.bytesTotal)
+    #expect(zip(all, all.dropFirst()).allSatisfy { $0.bytesDone <= $1.bytesDone }, "progress never goes back")
+    #expect(all.contains { $0.bytesDone > 0 && $0.bytesDone < 250_000 }, "reported within a file")
+  }
+
+  @Test func estimatorStartsFromThePriorAndLearnsBothCosts() {
+    var e = TransferEstimator()
+    #expect(abs(e.model.fixed - TransferEstimator.priorFixed) < 1e-9)
+    // A speaker twice as slow on both counts: 1.5 s/file + 2.4 s/MB.
+    for i in 0..<300 {
+      let bytes = i % 3 == 0 ? 10_000_000 : 10_000 // covers and tracks mixed
+      e.record(bytes: bytes, seconds: 1.5 + 2.4 * Double(bytes) / 1e6)
+    }
+    #expect(abs(e.model.fixed - 1.5) < 0.05)
+    #expect(abs(e.model.perMB - 2.4) < 0.05)
+    // 100 covers and nothing else left: the per-file cost dominates.
+    #expect(abs(e.secondsLeft(files: 100, bytes: 1_000_000) - (150 + 2.4)) < 5)
+  }
+
+  /// Only covers so far: throughput can't be told apart, so it stays near the prior.
+  @Test func estimatorKeepsThePriorThroughputWhileOnlySmallFilesAreDone() {
+    var e = TransferEstimator()
+    for _ in 0..<200 { e.record(bytes: 8_000, seconds: 0.7) }
+    #expect(abs(e.model.perMB - TransferEstimator.priorSecondsPerMB) < 0.1)
+    #expect(abs(e.model.fixed - 0.7) < 0.05)
+  }
+
+  @Test func progressCarriesAnEstimateOnceAFileIsDone() throws {
+    let seen = Locked<[SyncProgress]>([])
+    try sync(onProgress: { p in seen.mutate { $0.append(p) } }).run()
+    let all = seen.value
+    #expect(all.first { $0.filesDone == 0 }?.secondsLeft == nil)
+    #expect(all.last?.secondsLeft == 0)
   }
 
   @Test func abortIsReportedAsUserAbort() {
