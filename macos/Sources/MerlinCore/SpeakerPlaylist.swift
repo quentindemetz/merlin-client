@@ -187,10 +187,19 @@ public struct SpeakerPlaylist: SpeakerPlanContent {
       files.append(file("image", folderCover, title))
 
       var children: [OrderedJSON] = []
-      for t in available {
+      let covers = try available.map { t -> URL in
         let cover = coverDir.appendingPathComponent("\(t.id).jpg")
         let made = [t.cover, folder.cover].compactMap { $0 }.contains { (try? CoverImage.square(library.url($0), to: cover)) != nil }
         if !made { try Media.defaultCover(cover) }
+        return cover
+      }
+      // The speaker shows no titles: an album whose tracks all share one
+      // picture gets the track numbers drawn on it.
+      if covers.count > 1, covers.dropFirst().allSatisfy({ CoverImage.looksSame(covers[0], $0) }) {
+        for (n, cover) in zip(Self.trackNumbers(available), covers) { try CoverImage.addNumber(n, to: cover) }
+      }
+      for t in available {
+        let cover = coverDir.appendingPathComponent("\(t.id).jpg")
         files.append(file("image", cover, t.title))
         var audio = file("audio", sendable.files[t.id]!, t.title)
         audio["filename"] = "\(t.id).mp3"
@@ -224,6 +233,14 @@ public struct SpeakerPlaylist: SpeakerPlanContent {
 
   private func file(_ type: String, _ url: URL, _ title: String) -> JSONObject {
     ["type": type, "filename": url.lastPathComponent, "title": title, "path": url.path]
+  }
+
+  /// The tags' track numbers when every track has its own, else 1, 2, 3...
+  /// in the folder's order.
+  static func trackNumbers(_ tracks: [MediaLibrary.Track]) -> [Int] {
+    let tagged = tracks.compactMap(\.episode)
+    if tagged.count == tracks.count, Set(tagged).count == tagged.count, tagged.allSatisfy({ $0 > 0 }) { return tagged }
+    return Array(1...tracks.count)
   }
 
   /// Titles as the speaker gets them from the server: at most 63 bytes,

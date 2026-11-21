@@ -8,6 +8,7 @@ struct TaggedMedia: MediaTools {
   var album: String?
   var track: Int?
   var cover = false
+  var coverRGB: (CGFloat, CGFloat, CGFloat) = (0, 0, 1)
   var bitRate = 128_000
   /// Conversions made (dest file names), across copies of this value.
   var log = Locked<[String]>([])
@@ -32,7 +33,7 @@ struct TaggedMedia: MediaTools {
   }
   func extractCover(_ src: URL, _ dest: URL, _ info: MediaInfo) throws -> Bool {
     guard cover else { return false }
-    try solidImage(dest, width: 1000, height: 800, rgb: (0, 0, 1))
+    try solidImage(dest, width: 1000, height: 800, rgb: coverRGB)
     return true
   }
   func folderCover(_ title: String, _ dest: URL) throws { try Data("cover titled \(title)".utf8).write(to: dest) }
@@ -450,6 +451,50 @@ final class StubCatalog: CatalogSource {
     // If it can't be downloaded: the official cover shipped with the app.
     let fallback = try Data(contentsOf: URL(fileURLWithPath: try #require(cover.str("fallbackPath"))))
     #expect(fallback == (try Data(contentsOf: #require(SpeakerPlaylist.bundledCover("histoires")))))
+  }
+
+  /// An album whose tracks share one picture gets the track numbers on it;
+  /// a folder whose tracks have their own pictures is left alone.
+  @Test func tracksSharingTheirArtGetNumbered() throws {
+    let lib = try MediaLibrary(root: dir.appendingPathComponent("lib"))
+    let album = try lib.addFolder("Album", section: "Musique")
+    let mixed = try lib.addFolder("Mixed", section: "Musique")
+    for (i, tag) in [3, 1, 2].enumerated() {
+      let src = dir.appendingPathComponent("song\(i).mp3")
+      try silentMP3(frames: 5).write(to: src)
+      try lib.importFile(src, into: .folder(album.id), media: TaggedMedia(track: tag, cover: true))
+    }
+    for (i, rgb) in ([(0, 0, 1), (1, 0, 0)] as [(CGFloat, CGFloat, CGFloat)]).enumerated() { // blue art, then red
+      let src = dir.appendingPathComponent("other\(i).mp3")
+      try silentMP3(frames: 5).write(to: src)
+      try lib.importFile(src, into: .folder(mixed.id), media: TaggedMedia(cover: true, coverRGB: rgb))
+    }
+    var plan: JSONObject = ["playlistText": Self.serverTree, "fileList": []]
+    let covers = dir.appendingPathComponent("c")
+    try SpeakerPlaylist(library: lib, settingID: "s1", coverDir: covers, media: TaggedMedia()).build(&plan)
+
+    func cover(_ t: MediaLibrary.Track) -> URL { covers.appendingPathComponent("\(t.id).jpg") }
+    let plain = dir.appendingPathComponent("plain.jpg")
+    let albumTracks = lib.tracks(in: album.id)
+    try CoverImage.square(lib.url(try #require(albumTracks[0].cover)), to: plain)
+    let numbered = albumTracks.map(cover)
+    #expect(numbered.allSatisfy { try! Data(contentsOf: $0) != Data(contentsOf: plain) }, "numbers drawn")
+    #expect(Set(numbered.map { try! Data(contentsOf: $0) }).count == 3, "each its own number")
+    #expect(albumTracks.map(\.episode) == [1, 2, 3], "imports are placed by their track number")
+    #expect(SpeakerPlaylist.trackNumbers(albumTracks) == [1, 2, 3])
+
+    let first = try #require(lib.tracks(in: mixed.id).first)
+    #expect(try Data(contentsOf: cover(first)) == Data(contentsOf: plain), "different art: untouched")
+  }
+
+  @Test func trackNumbersFallBackToTheFolderOrder() {
+    func track(_ episode: Int?) -> MediaLibrary.Track {
+      MediaLibrary.Track(id: UUID().uuidString, folderID: "f", title: "t", artist: nil, episode: episode, position: 0, duration: nil,
+                         audio: "a.mp3", size: 1, cover: nil, source: .file, sourceID: nil, sourceName: nil, addedAt: 0, speakerReady: true)
+    }
+    #expect(SpeakerPlaylist.trackNumbers([track(5), track(6)]) == [5, 6])
+    #expect(SpeakerPlaylist.trackNumbers([track(1), track(1)]) == [1, 2], "duplicates")
+    #expect(SpeakerPlaylist.trackNumbers([track(4), track(nil), track(2)]) == [1, 2, 3], "missing")
   }
 
   @Test func merlinsSectionCoversShipWithTheApp() throws {

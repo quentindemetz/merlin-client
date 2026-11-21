@@ -39,6 +39,55 @@ public enum CoverImage {
     try writeJPEG(flatten(image, width: size, height: size, fill: true), to: dest)
   }
 
+  /// Whether two covers show the same picture: compared on 16x16
+  /// thumbnails, so re-encoded copies of the same art still match.
+  public static func looksSame(_ a: URL, _ b: URL) -> Bool {
+    guard let x = fingerprint(a), let y = fingerprint(b), x.count == y.count else { return false }
+    let diff = zip(x, y).reduce(0) { $0 + abs(Int($1.0) - Int($1.1)) }
+    return Double(diff) / Double(x.count) <= 6 // out of 255
+  }
+
+  static func fingerprint(_ url: URL, side: Int = 16) -> [UInt8]? {
+    guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
+          let image = CGImageSourceCreateImageAtIndex(source, 0, nil),
+          let ctx = CGContext(data: nil, width: side, height: side, bitsPerComponent: 8, bytesPerRow: side * 4,
+                              space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                              bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue) else { return nil }
+    ctx.interpolationQuality = .medium
+    ctx.draw(image, in: CGRect(x: 0, y: 0, width: side, height: side))
+    guard let data = ctx.data else { return nil }
+    let bytes = UnsafeBufferPointer(start: data.assumingMemoryBound(to: UInt8.self), count: side * side * 4)
+    return bytes.enumerated().filter { $0.offset % 4 != 3 }.map(\.element) // RGB
+  }
+
+  /// Puts `number` on the cover, in a round badge at the bottom right
+  /// (tracks of an album sharing its art stay apart on the speaker).
+  public static func addNumber(_ number: Int, to url: URL) throws {
+    guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
+          let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
+      throw MerlinError("can't read the image \(url.lastPathComponent)")
+    }
+    let w = image.width, h = image.height
+    guard let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: 0,
+                              space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                              bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue) else {
+      throw MerlinError("can't draw the cover")
+    }
+    ctx.draw(image, in: CGRect(x: 0, y: 0, width: w, height: h))
+    let side = Double(min(w, h)), d = side * 0.47, margin = side * 0.04
+    let circle = CGRect(x: Double(w) - d - margin, y: margin, width: d, height: d) // CG's origin is bottom left
+    ctx.setFillColor(CGColor(gray: 0, alpha: 0.72))
+    ctx.fillEllipse(in: circle)
+    ctx.setStrokeColor(CGColor(gray: 1, alpha: 0.9))
+    ctx.setLineWidth(max(1, side / 64))
+    ctx.strokeEllipse(in: circle.insetBy(dx: side / 128, dy: side / 128))
+    let text = String(number)
+    let box = circle.insetBy(dx: d * (text.count > 2 ? 0.14 : 0.2), dy: d * 0.2)
+    Media.drawFitted(text, in: ctx, box: box)
+    guard let out = ctx.makeImage() else { throw MerlinError("can't draw the cover") }
+    try writeJPEG(out, to: url)
+  }
+
   /// Draws on an opaque sRGB canvas (no alpha in JPEGs; transparent PNGs
   /// get a white background).
   static func flatten(_ image: CGImage, width: Int, height: Int, fill: Bool) throws -> CGImage {
