@@ -21,6 +21,35 @@ public struct SpeakerPlaylist: SpeakerPlanContent {
   /// How many tracks "Dernier ajouts" lists.
   static let recentCount = 20
 
+  /// Merlin's own sections, as its server sends them (same uuids in every
+  /// plan), by normalized title. Their 128x128 covers, as served by Merlin,
+  /// ship with the app: Resources/SectionCovers/<key>.jpg.
+  static let merlinSections: [String: String] = [
+    "histoires": "8a251a87-9533-4638-81e0-2b2c911c4a98",
+    "musique": "fd32185b-e8bb-463c-8198-0a6c4eb4b954",
+    "documentaires": "4966cf91-8698-4a5a-be3d-094566e66301",
+  ]
+
+  /// The official cover of one of Merlin's sections, from the app's resources.
+  static func bundledCover(_ key: String) -> URL? {
+    resourceBundle?.url(forResource: key, withExtension: "jpg", subdirectory: "SectionCovers")
+  }
+
+  /// MerlinCore's resource bundle, wherever it was put: in the .app's
+  /// Resources (build-app.sh), or next to the binary / test bundle (swift
+  /// build). Not Bundle.module, which crashes when the bundle is missing.
+  private static let resourceBundle: Bundle? = {
+    let name = "Merlin_MerlinCore.bundle"
+    let here = Bundle(for: ResourceToken.self)
+    let places = [Bundle.main.resourceURL, Bundle.main.bundleURL, Bundle.main.executableURL?.deletingLastPathComponent(),
+                  here.resourceURL, here.bundleURL.deletingLastPathComponent()]
+    return places.compactMap { $0?.appendingPathComponent(name) }
+      .first { FileManager.default.fileExists(atPath: $0.path) }
+      .flatMap(Bundle.init(url:))
+  }()
+
+  private final class ResourceToken {}
+
   /// The server's "recently added" node: tracks, not a section.
   public static func isRecent(_ title: String) -> Bool {
     ["dernier ajouts", "derniers ajouts", "dernier ajout", "derniers ajout"].contains(normalized(title))
@@ -84,6 +113,13 @@ public struct SpeakerPlaylist: SpeakerPlanContent {
     var files = plan.objs("fileList").filter { f in
       f.str("type") == "image" && kept.contains(((f.str("filename") ?? "") as NSString).deletingPathExtension)
     }
+    // Remember Merlin's sections (uuid and cover) for plans that leave them out.
+    for n in sectionNodes {
+      guard let uuid = n["uuid"]?.stringValue, let title = n["title"]?.stringValue,
+            let url = files.first(where: { ($0.str("filename") as NSString?)?.deletingPathExtension == uuid })?.str("url"),
+            let data = try? JSON.data(["uuid": uuid, "cover": url]) else { continue }
+      library.setMeta("speaker_section.\(Self.normalized(title))", String(decoding: data, as: UTF8.self))
+    }
     // Sections the speaker can get even if Merlin didn't send them.
     let known = Set((MediaLibrary.defaultSections + (library.meta("speaker_sections") ?? "").split(separator: "\n").map(String.init))
       .filter { !Self.isRecent($0) }.map(Self.normalized))
@@ -92,12 +128,29 @@ public struct SpeakerPlaylist: SpeakerPlanContent {
     }
     func addSection(_ title: String) throws -> Int {
       let key = Self.normalized(title)
-      let legacy = key == Self.normalized(MediaLibrary.defaultSections[0]) ? library.meta("speaker_section_uuid") : nil
-      let uuid = library.meta("speaker_section_uuid.\(key)") ?? legacy ?? MediaLibrary.newID()
-      library.setMeta("speaker_section_uuid.\(key)", uuid)
+      // As Merlin last sent it (uuid + cover URL), else one of its own
+      // sections (uuid + bundled cover), else ours.
+      let seen = library.meta("speaker_section.\(key)").flatMap { try? JSON.parse(Data($0.utf8)) as? JSONObject }
+      let seenUUID = seen?.str("uuid"), seenURL = seen?.str("cover")
+      let uuid: String
+      if let id = seenUUID ?? Self.merlinSections[key] {
+        uuid = id
+      } else {
+        let legacy = key == Self.normalized(MediaLibrary.defaultSections[0]) ? library.meta("speaker_section_uuid") : nil
+        uuid = library.meta("speaker_section_uuid.\(key)") ?? legacy ?? MediaLibrary.newID()
+        library.setMeta("speaker_section_uuid.\(key)", uuid)
+      }
       let cover = coverDir.appendingPathComponent("\(uuid).jpg")
-      try media.folderCover(title, cover)
-      files.append(file("image", cover, title))
+      if let bundled = Self.bundledCover(key) {
+        try FileManager.default.copyItem(at: bundled, to: cover)
+      } else {
+        try media.folderCover(title, cover)
+      }
+      if let seenURL { // the latest cover Merlin sent; the one above if it can't be downloaded
+        files.append(["type": "image", "filename": "\(uuid).jpg", "title": title, "url": seenURL, "fallbackPath": cover.path])
+      } else {
+        files.append(file("image", cover, title))
+      }
       sectionNodes.append(.object([("uuid", .from(uuid)), ("title", .from(title)), ("child", .array([]))]))
       return sectionNodes.count - 1
     }

@@ -39,7 +39,8 @@ final class StubBackend: SyncBackend {
     if failDownloads { throw MerlinError("bad URI") }
     downloads.append(url)
     try FileManager.default.createDirectory(at: dest.deletingLastPathComponent(), withIntermediateDirectories: true)
-    try contents[url]!.write(to: dest)
+    guard let data = contents[url] else { throw BackendError("404 for \(url)") }
+    try data.write(to: dest)
   }
 
   func reportSynchro(id: String, body: JSONObject) throws {
@@ -333,6 +334,21 @@ final class SyncTests {
     try sync(out: out).run()
     #expect(backend.downloads.count == 2)
     #expect(out.text.contains("0 file(s) uploaded, 2 already on the speaker"))
+  }
+
+  /// A section's official cover is optional: if it can't be downloaded the
+  /// generated one goes instead, and the sync carries on.
+  @Test func optionalImageFallsBackWhenItCannotBeDownloaded() throws {
+    let fallback = dir.appendingPathComponent("generated.jpg")
+    try Data("GENERATED".utf8).write(to: fallback)
+    var files = backend.plan.objs("fileList")
+    files.append(["type": "image", "url": "https://cdn/gone.jpg", "filename": "sec.jpg", "fallbackPath": fallback.path])
+    backend.plan["fileList"] = files
+    let out = Captured()
+    try sync(out: out).run()
+    #expect(fake.file("sec.jpg") == "GENERATED")
+    #expect(out.text.contains("could not download sec.jpg"))
+    #expect(lastReport.str("status") == "SUCCESS")
   }
 
   @Test func downloadFailureIsReported() {

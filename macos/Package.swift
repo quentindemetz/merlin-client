@@ -13,7 +13,9 @@ let package = Package(
   targets: [
     // Everything that isn't UI: speaker protocol, cloud API, sync, Wi-Fi,
     // traffic filter, local library. Blocking code, run off the main thread.
-    .target(name: "MerlinCore", linkerSettings: [.linkedLibrary("sqlite3")]),
+    // Resources: the official covers of Merlin's sections (see SpeakerPlaylist).
+    .target(name: "MerlinCore", resources: [.copy("Resources/SectionCovers")],
+            linkerSettings: [.linkedLibrary("sqlite3")]),
     .executableTarget(name: "Merlin", dependencies: ["MerlinCore"]),
     .testTarget(name: "MerlinCoreTests", dependencies: ["MerlinCore"]),
   ],

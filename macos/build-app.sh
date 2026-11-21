@@ -13,6 +13,8 @@ rm -rf "$app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 cp "$bin" "$app/Contents/MacOS/Merlin"
 cp Resources/Info.plist "$app/Contents/Info.plist"
+# MerlinCore's resources (section covers), found by SpeakerPlaylist.
+cp -R "$(dirname "$bin")/Merlin_MerlinCore.bundle" "$app/Contents/Resources/"
 
 iconset=build/AppIcon.iconset
 rm -rf "$iconset"

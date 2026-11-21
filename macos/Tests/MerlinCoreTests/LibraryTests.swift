@@ -413,12 +413,52 @@ final class StubCatalog: CatalogSource {
     #expect(names.contains("\(tree[0].str("uuid")!).jpg") && names.contains("\(tree[1].str("uuid")!).jpg"), "created sections get covers")
     #expect(names.contains("recent.jpg") && names.contains("fav.jpg"))
     #expect(!lib.sections().contains("Dernier ajouts"))
+    // Merlin's own sections, with its covers (shipped with the app).
+    #expect(tree[0].str("uuid") == SpeakerPlaylist.merlinSections["histoires"])
+    #expect(tree[1].str("uuid") == SpeakerPlaylist.merlinSections["musique"])
+    let official = try #require(plan.objs("fileList").first { $0.str("filename") == "\(tree[1].str("uuid")!).jpg" })
+    let bundled = try #require(SpeakerPlaylist.bundledCover("musique"))
+    #expect(official.str("url") == nil)
+    #expect(try Data(contentsOf: URL(fileURLWithPath: official.str("path")!)) == Data(contentsOf: bundled))
 
     // Same uuids next time: the speaker keeps its sections.
     var again: JSONObject = ["playlistText": server, "fileList": []]
     try SpeakerPlaylist(library: lib, settingID: "s1", coverDir: covers, media: TaggedMedia()).build(&again)
     let tree2 = try JSON.parse(again["playlistText"] as! String) as! [JSONObject]
     #expect(tree2.map { $0.str("uuid") } == tree.map { $0.str("uuid") })
+  }
+
+  /// A section Merlin sent once keeps its uuid and cover when a later plan leaves it out.
+  @Test func sectionsSeenBeforeKeepMerlinsUUIDAndCover() throws {
+    let lib = try MediaLibrary(root: dir.appendingPathComponent("lib"))
+    let f = try lib.addFolder("Contes", section: "Histoires")
+    let src = dir.appendingPathComponent("a.mp3")
+    try silentMP3(frames: 5).write(to: src)
+    try lib.importFile(src, into: .folder(f.id), media: TaggedMedia())
+    let covers = dir.appendingPathComponent("c")
+    var first: JSONObject = ["playlistText": Self.serverTree, "fileList": [
+      ["type": "image", "filename": "sec-h.jpg", "url": "https://cdn/sec-h.jpg"],
+    ]]
+    try SpeakerPlaylist(library: lib, settingID: "s1", coverDir: covers, media: TaggedMedia()).build(&first)
+
+    var later: JSONObject = ["playlistText": #"[{"uuid":"fav","title":"Merlin_favorite","favorite":1,"child":[]}]"#, "fileList": []]
+    try SpeakerPlaylist(library: lib, settingID: "s1", coverDir: covers, media: TaggedMedia()).build(&later)
+    let tree = try JSON.parse(later["playlistText"] as! String) as! [JSONObject]
+    #expect(tree.map { $0.str("uuid") } == ["sec-h", "fav"])
+    let cover = try #require(later.objs("fileList").first { $0.str("filename") == "sec-h.jpg" })
+    #expect(cover.str("url") == "https://cdn/sec-h.jpg")
+    // If it can't be downloaded: the official cover shipped with the app.
+    let fallback = try Data(contentsOf: URL(fileURLWithPath: try #require(cover.str("fallbackPath"))))
+    #expect(fallback == (try Data(contentsOf: #require(SpeakerPlaylist.bundledCover("histoires")))))
+  }
+
+  @Test func merlinsSectionCoversShipWithTheApp() throws {
+    for key in SpeakerPlaylist.merlinSections.keys {
+      let url = try #require(SpeakerPlaylist.bundledCover(key), "missing Resources/SectionCovers/\(key).jpg")
+      let src = try #require(CGImageSourceCreateWithURL(url as CFURL, nil))
+      let props = try #require(CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any])
+      #expect(props[kCGImagePropertyPixelWidth] as? Int == 128 && props[kCGImagePropertyPixelHeight] as? Int == 128)
+    }
   }
 
   @Test func titlesAreShortenedLikeTheServerDoes() {

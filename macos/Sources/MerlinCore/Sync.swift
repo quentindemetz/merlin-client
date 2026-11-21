@@ -167,7 +167,15 @@ public final class Sync: @unchecked Sendable {
         // "filesize" — the API reports a placeholder (20000) for images.
         if fileSize(dest) == 0 {
           say("  downloading \(f.str("type") ?? "") \(filename) (\(f.str("title") ?? ""))")
-          try backend.download(url, to: dest, cancel: cancel)
+          do {
+            try backend.download(url, to: dest, cancel: cancel)
+          } catch where !(error is CancellationError) && f.str("fallbackPath") != nil {
+            // An optional image (e.g. a section's official cover): use ours.
+            say("  warning: could not download \(filename) (\(error.userMessage)); using a generated cover")
+            var out = f
+            out["path"] = f.str("fallbackPath")
+            return out
+          }
         }
         var out = f
         out["path"] = dest.path
