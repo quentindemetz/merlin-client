@@ -378,6 +378,49 @@ final class StubCatalog: CatalogSource {
     #expect(tree[0].objs("child").map { $0.str("title") } == ["A"])
   }
 
+  /// What Merlin sends once the account has no content of its own: no
+  /// sections, only the favorites and "recently added" nodes.
+  @Test func missingSectionsAreCreatedAndRecentlyAddedListsTracks() throws {
+    let lib = try MediaLibrary(root: dir.appendingPathComponent("lib"))
+    let stories = try lib.addFolder("Contes", section: "Histoires")
+    let music = try lib.addFolder("Comptines", section: "Musique")
+    let other = try lib.addFolder("Divers", section: "Inconnue")
+    for (f, name) in [(stories, "a.mp3"), (music, "b.mp3"), (other, "c.mp3")] {
+      let src = dir.appendingPathComponent(name)
+      try silentMP3(frames: 5).write(to: src)
+      try lib.importFile(src, into: .folder(f.id), media: TaggedMedia())
+    }
+    let server = """
+    [{"uuid":"fav","title":"Merlin_favorite","favorite":1,"child":[]},
+     {"uuid":"recent","title":"Dernier ajouts","child":[{"uuid":"t-old","title":"Old"}]}]
+    """
+    var plan: JSONObject = ["playlistText": server, "fileList": [
+      ["type": "image", "filename": "fav.jpg", "url": "https://cdn/fav.jpg"],
+      ["type": "image", "filename": "recent.jpg", "url": "https://cdn/recent.jpg"],
+    ]]
+    let covers = dir.appendingPathComponent("c")
+    try SpeakerPlaylist(library: lib, settingID: "s1", coverDir: covers, media: TaggedMedia()).build(&plan)
+    let tree = try JSON.parse(plan["playlistText"] as! String) as! [JSONObject]
+    #expect(tree.map { $0.str("title") } == ["Histoires", "Musique", "Merlin_favorite", "Dernier ajouts"])
+    #expect(tree[0].objs("child").map { $0.str("title") } == ["Contes", "Divers"], "unknown section -> first one")
+    #expect(tree[1].objs("child").map { $0.str("title") } == ["Comptines"])
+    // Recently added: the tracks themselves, not folders.
+    let recent = tree[3].objs("child")
+    let trackIDs = Set(tree[0...1].flatMap { $0.objs("child") }.flatMap { $0.objs("child") }.compactMap { $0.str("uuid") })
+    #expect(recent.count == 3 && Set(recent.compactMap { $0.str("uuid") }) == trackIDs)
+    #expect(recent.allSatisfy { $0["child"] == nil })
+    let names = plan.objs("fileList").compactMap { $0.str("filename") }
+    #expect(names.contains("\(tree[0].str("uuid")!).jpg") && names.contains("\(tree[1].str("uuid")!).jpg"), "created sections get covers")
+    #expect(names.contains("recent.jpg") && names.contains("fav.jpg"))
+    #expect(!lib.sections().contains("Dernier ajouts"))
+
+    // Same uuids next time: the speaker keeps its sections.
+    var again: JSONObject = ["playlistText": server, "fileList": []]
+    try SpeakerPlaylist(library: lib, settingID: "s1", coverDir: covers, media: TaggedMedia()).build(&again)
+    let tree2 = try JSON.parse(again["playlistText"] as! String) as! [JSONObject]
+    #expect(tree2.map { $0.str("uuid") } == tree.map { $0.str("uuid") })
+  }
+
   @Test func titlesAreShortenedLikeTheServerDoes() {
     #expect(SpeakerPlaylist.title("  a   b ") == "a b")
     let t = SpeakerPlaylist.title(String(repeating: "é", count: 40)) // 80 bytes

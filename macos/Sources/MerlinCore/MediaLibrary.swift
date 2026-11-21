@@ -266,7 +266,7 @@ public final class MediaLibrary: @unchecked Sendable {
   /// Every section a folder uses, the defaults, and the speaker's own.
   public func sections() -> [String] {
     var seen = Set<String>()
-    let speaker = (meta("speaker_sections") ?? "").split(separator: "\n").map(String.init)
+    let speaker = (meta("speaker_sections") ?? "").split(separator: "\n").map(String.init).filter { !SpeakerPlaylist.isRecent($0) }
     return (speaker + Self.defaultSections + folders().map(\.section)).filter {
       !$0.isEmpty && seen.insert(SpeakerPlaylist.normalized($0)).inserted
     }

@@ -7,13 +7,24 @@ public protocol SpeakerPlanContent {
 }
 
 /// The speaker gets the library: Merlin's plan keeps its sections (and
-/// their covers) and the favorites node, but everything inside them is
-/// replaced by the library's folders, each in the section of the same name
-/// (else the first one). The speaker's tree is section -> folder -> track,
-/// every node needs a <uuid>.jpg cover and every track a <uuid>.mp3; the
-/// 128x128 covers are made in coverDir for each sync.
+/// their covers), the favorites node and the "recently added" node, but
+/// everything inside them is replaced by the library's folders, each in the
+/// section of the same name. Merlin only sends the sections the account has
+/// content in, so a missing known section (a default one, or one the
+/// speaker had before) is created; any other name goes to the first
+/// section. The speaker's tree is section -> folder -> track, except
+/// "Dernier ajouts", a flat list of the newest tracks (same uuids as in
+/// their folders). Every node needs a <uuid>.jpg cover and every track a
+/// <uuid>.mp3; the 128x128 covers are made in coverDir for each sync.
 public struct SpeakerPlaylist: SpeakerPlanContent {
   static let titleBytes = 63 // longest title the server sends; it shortens with "..."
+  /// How many tracks "Dernier ajouts" lists.
+  static let recentCount = 20
+
+  /// The server's "recently added" node: tracks, not a section.
+  public static func isRecent(_ title: String) -> Bool {
+    ["dernier ajouts", "derniers ajouts", "dernier ajout", "derniers ajout"].contains(normalized(title))
+  }
 
   public struct Summary: Equatable {
     public var folders = 0
@@ -55,34 +66,41 @@ public struct SpeakerPlaylist: SpeakerPlanContent {
     try? FileManager.default.removeItem(at: coverDir)
     try FileManager.default.createDirectory(at: coverDir, withIntermediateDirectories: true)
 
-    // Merlin's containers, emptied.
-    var nodes: [OrderedJSON] = []
-    var sections: [(key: String, index: Int)] = []
+    // Merlin's containers, emptied: sections first, then the special nodes.
+    var sectionNodes: [OrderedJSON] = [], special: [OrderedJSON] = []
+    var recentIndex: Int? // in special
     for n in top where n["child"]?.arrayValue != nil {
       var node = n
       node.set("child", .array([]))
-      nodes.append(node)
       let favorite = n["favorite"].map { $0 != .bool(false) && $0 != .null && $0 != .number("0") } ?? false
-      if !favorite {
-        sections.append((Self.normalized(n["title"]?.stringValue ?? ""), nodes.count - 1))
+      if favorite || Self.isRecent(n["title"]?.stringValue ?? "") {
+        if !favorite { recentIndex = special.count }
+        special.append(node)
+      } else {
+        sectionNodes.append(node)
       }
     }
-    let kept = Set(nodes.compactMap { $0["uuid"]?.stringValue })
+    let kept = Set((sectionNodes + special).compactMap { $0["uuid"]?.stringValue })
     var files = plan.objs("fileList").filter { f in
       f.str("type") == "image" && kept.contains(((f.str("filename") ?? "") as NSString).deletingPathExtension)
     }
-    if sections.isEmpty {
-      let uuid = library.meta("speaker_section_uuid") ?? MediaLibrary.newID()
-      library.setMeta("speaker_section_uuid", uuid)
-      let title = MediaLibrary.defaultSections[0]
+    // Sections the speaker can get even if Merlin didn't send them.
+    let known = Set((MediaLibrary.defaultSections + (library.meta("speaker_sections") ?? "").split(separator: "\n").map(String.init))
+      .filter { !Self.isRecent($0) }.map(Self.normalized))
+    func sectionIndex(_ name: String) -> Int? {
+      sectionNodes.firstIndex { Self.normalized($0["title"]?.stringValue ?? "") == Self.normalized(name) }
+    }
+    func addSection(_ title: String) throws -> Int {
+      let key = Self.normalized(title)
+      let legacy = key == Self.normalized(MediaLibrary.defaultSections[0]) ? library.meta("speaker_section_uuid") : nil
+      let uuid = library.meta("speaker_section_uuid.\(key)") ?? legacy ?? MediaLibrary.newID()
+      library.setMeta("speaker_section_uuid.\(key)", uuid)
       let cover = coverDir.appendingPathComponent("\(uuid).jpg")
       try media.folderCover(title, cover)
       files.append(file("image", cover, title))
-      nodes.insert(.object([("uuid", .from(uuid)), ("title", .from(title)), ("child", .array([]))]), at: 0)
-      sections = [(Self.normalized(title), 0)]
+      sectionNodes.append(.object([("uuid", .from(uuid)), ("title", .from(title)), ("child", .array([]))]))
+      return sectionNodes.count - 1
     }
-    let titles = sections.map { nodes[$0.index]["title"]?.stringValue ?? "" }.filter { !$0.isEmpty }
-    if !titles.isEmpty { library.setMeta("speaker_sections", titles.joined(separator: "\n")) }
 
     let synced = library.syncedFolders(target)
     var messages: [String] = []
@@ -94,10 +112,18 @@ public struct SpeakerPlaylist: SpeakerPlanContent {
     audio.prune(keeping: Set(library.allTracks().map(\.id)))
 
     var summary = Summary()
+    var recent: [(Int, OrderedJSON)] = []
     for (folder, tracks) in synced {
       let available = tracks.filter { sendable.files[$0.id] != nil }
       guard !available.isEmpty else { continue }
-      let index = sections.first { $0.key == Self.normalized(folder.section) }?.index ?? sections[0].index
+      let index: Int
+      if let i = sectionIndex(folder.section) {
+        index = i
+      } else if known.contains(Self.normalized(folder.section)) || sectionNodes.isEmpty {
+        index = try addSection(known.contains(Self.normalized(folder.section)) ? folder.section : MediaLibrary.defaultSections[0])
+      } else {
+        index = 0
+      }
       let title = Self.title(folder.title)
 
       let folderCover = coverDir.appendingPathComponent("\(folder.id).jpg")
@@ -116,19 +142,29 @@ public struct SpeakerPlaylist: SpeakerPlanContent {
         var audio = file("audio", sendable.files[t.id]!, t.title)
         audio["filename"] = "\(t.id).mp3"
         files.append(audio)
-        children.append(.object([
+        let node = OrderedJSON.object([
           ("uuid", .from(t.id)), ("title", .from(Self.title(t.title))), ("add_time", .from(t.addedAt)),
           ("limit_time", .from(0)), ("type", .from("free")),
-        ]))
+        ])
+        children.append(node)
+        recent.append((t.addedAt, node))
       }
-      var kids = nodes[index]["child"]?.arrayValue ?? []
+      var kids = sectionNodes[index]["child"]?.arrayValue ?? []
       kids.append(.object([("uuid", .from(folder.id)), ("title", .from(title)), ("child", .array(children))]))
-      nodes[index].set("child", .array(kids))
+      sectionNodes[index].set("child", .array(kids))
       summary.folders += 1
       summary.tracks += children.count
     }
+    if let recentIndex { // newest first; stable for tracks added together
+      let newest = recent.enumerated().sorted { ($0.element.0, -$0.offset) > ($1.element.0, -$1.offset) }
+        .prefix(Self.recentCount).map(\.element.1)
+      special[recentIndex].set("child", .array(Array(newest)))
+    }
 
-    plan["playlistText"] = OrderedJSON.array(nodes).serialized
+    let titles = sectionNodes.compactMap { $0["title"]?.stringValue }.filter { !$0.isEmpty }
+    if !titles.isEmpty { library.setMeta("speaker_sections", titles.joined(separator: "\n")) }
+
+    plan["playlistText"] = OrderedJSON.array(sectionNodes + special).serialized
     plan["fileList"] = files
     return summary
   }
