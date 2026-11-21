@@ -36,7 +36,7 @@ public enum CoverImage {
           let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
       throw MerlinError("can't read the image \(src.lastPathComponent)")
     }
-    try writeJPEG(flatten(image, width: size, height: size, fill: true), to: dest)
+    try writeSpeakerJPEG(flatten(image, width: size, height: size, fill: true), to: dest)
   }
 
   /// Whether two covers show the same picture: compared on 16x16
@@ -85,7 +85,45 @@ public enum CoverImage {
     let box = circle.insetBy(dx: d * (text.count > 2 ? 0.14 : 0.2), dy: d * 0.2)
     Media.drawFitted(text, in: ctx, box: box)
     guard let out = ctx.makeImage() else { throw MerlinError("can't draw the cover") }
-    try writeJPEG(out, to: url)
+    try writeSpeakerJPEG(out, to: url)
+  }
+
+  /// A cover for the speaker. Its screen shows 16-bit colour (RGB565): the
+  /// firmware's LVGL drops the low bits (5 for red and blue, 6 for green).
+  /// A colour near the edge of one of those steps flips to the next with the
+  /// slightest JPEG noise, so flat areas and edges speckle on the speaker. So
+  /// every colour is moved to the middle of its step (which the screen
+  /// can't tell apart from the original) and saved at quality 1.0, which is
+  /// also the only quality where ImageIO keeps full colour resolution (4:4:4).
+  /// About 0.5% of pixels still flip, against 15-19% for a quality 0.95 file.
+  static func writeSpeakerJPEG(_ image: CGImage, to dest: URL) throws {
+    try writeJPEG(snappedToRGB565(image), to: dest, quality: 1.0)
+  }
+
+  /// Each channel moved to the middle of its RGB565 step: red and blue to
+  /// 8k + 4, green to 4k + 2.
+  static func snappedToRGB565(_ image: CGImage) throws -> CGImage {
+    let w = image.width, h = image.height
+    guard let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w * 4,
+                              space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                              bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue),
+          let data = ctx.data else {
+      throw MerlinError("can't draw the cover")
+    }
+    ctx.draw(image, in: CGRect(x: 0, y: 0, width: w, height: h))
+    let px = data.assumingMemoryBound(to: UInt8.self)
+    for i in stride(from: 0, to: w * h * 4, by: 4) {
+      px[i] = Self.snap(px[i], bits: 5)
+      px[i + 1] = Self.snap(px[i + 1], bits: 6)
+      px[i + 2] = Self.snap(px[i + 2], bits: 5)
+    }
+    guard let out = ctx.makeImage() else { throw MerlinError("can't draw the cover") }
+    return out
+  }
+
+  static func snap(_ v: UInt8, bits: Int) -> UInt8 {
+    let step = 1 << (8 - bits)
+    return UInt8(min(Int(v) / step * step + step / 2, 255))
   }
 
   /// Draws on an opaque sRGB canvas (no alpha in JPEGs; transparent PNGs

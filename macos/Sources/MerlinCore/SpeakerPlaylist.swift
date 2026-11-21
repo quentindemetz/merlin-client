@@ -146,7 +146,10 @@ public struct SpeakerPlaylist: SpeakerPlanContent {
       } else {
         try media.folderCover(title, cover)
       }
-      if let seenURL { // the latest cover Merlin sent; the one above if it can't be downloaded
+      // Merlin's own sections: the shipped covers, made for the speaker's
+      // screen (Merlin's JPEGs speckle on it). Others: the latest cover
+      // Merlin sent; the one above if it can't be downloaded.
+      if let seenURL, Self.bundledCover(key) == nil {
         files.append(["type": "image", "filename": "\(uuid).jpg", "title": title, "url": seenURL, "fallbackPath": cover.path])
       } else {
         files.append(file("image", cover, title))

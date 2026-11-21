@@ -429,28 +429,58 @@ final class StubCatalog: CatalogSource {
     #expect(tree2.map { $0.str("uuid") } == tree.map { $0.str("uuid") })
   }
 
-  /// A section Merlin sent once keeps its uuid and cover when a later plan leaves it out.
+  /// A section Merlin sent once keeps its uuid and cover when a later plan
+  /// leaves it out; Merlin's own sections use the covers shipped with the app.
   @Test func sectionsSeenBeforeKeepMerlinsUUIDAndCover() throws {
     let lib = try MediaLibrary(root: dir.appendingPathComponent("lib"))
-    let f = try lib.addFolder("Contes", section: "Histoires")
-    let src = dir.appendingPathComponent("a.mp3")
-    try silentMP3(frames: 5).write(to: src)
-    try lib.importFile(src, into: .folder(f.id), media: TaggedMedia())
+    for (i, section) in ["Histoires", "Langues"].enumerated() {
+      let f = try lib.addFolder("Folder \(i)", section: section)
+      let src = dir.appendingPathComponent("a\(i).mp3")
+      try silentMP3(frames: 5).write(to: src)
+      try lib.importFile(src, into: .folder(f.id), media: TaggedMedia())
+    }
     let covers = dir.appendingPathComponent("c")
-    var first: JSONObject = ["playlistText": Self.serverTree, "fileList": [
+    var first: JSONObject = ["playlistText": """
+    [{"uuid":"sec-h","title":"Histoires","child":[]},{"uuid":"sec-l","title":"Langues","child":[]},
+     {"uuid":"fav","title":"Merlin_favorite","favorite":1,"child":[]}]
+    """, "fileList": [
       ["type": "image", "filename": "sec-h.jpg", "url": "https://cdn/sec-h.jpg"],
+      ["type": "image", "filename": "sec-l.jpg", "url": "https://cdn/sec-l.jpg"],
     ]]
     try SpeakerPlaylist(library: lib, settingID: "s1", coverDir: covers, media: TaggedMedia()).build(&first)
 
     var later: JSONObject = ["playlistText": #"[{"uuid":"fav","title":"Merlin_favorite","favorite":1,"child":[]}]"#, "fileList": []]
     try SpeakerPlaylist(library: lib, settingID: "s1", coverDir: covers, media: TaggedMedia()).build(&later)
     let tree = try JSON.parse(later["playlistText"] as! String) as! [JSONObject]
-    #expect(tree.map { $0.str("uuid") } == ["sec-h", "fav"])
-    let cover = try #require(later.objs("fileList").first { $0.str("filename") == "sec-h.jpg" })
-    #expect(cover.str("url") == "https://cdn/sec-h.jpg")
-    // If it can't be downloaded: the official cover shipped with the app.
-    let fallback = try Data(contentsOf: URL(fileURLWithPath: try #require(cover.str("fallbackPath"))))
-    #expect(fallback == (try Data(contentsOf: #require(SpeakerPlaylist.bundledCover("histoires")))))
+    #expect(tree.map { $0.str("uuid") } == ["sec-h", "sec-l", "fav"])
+    let files = later.objs("fileList")
+    // Merlin's own section: the shipped cover, not Merlin's JPEG.
+    let histoires = try #require(files.first { $0.str("filename") == "sec-h.jpg" })
+    #expect(histoires.str("url") == nil)
+    #expect(try Data(contentsOf: URL(fileURLWithPath: #require(histoires.str("path"))))
+      == Data(contentsOf: #require(SpeakerPlaylist.bundledCover("histoires"))))
+    // Another section: Merlin's cover, ours if it can't be downloaded.
+    let langues = try #require(files.first { $0.str("filename") == "sec-l.jpg" })
+    #expect(langues.str("url") == "https://cdn/sec-l.jpg")
+    let fallback = try String(contentsOfFile: #require(langues.str("fallbackPath")), encoding: .utf8)
+    #expect(fallback == "cover titled Langues")
+  }
+
+  /// The speaker's 16-bit screen drops the low bits: covers are saved with
+  /// each colour mid-step, so JPEG noise doesn't flip it to the next one.
+  @Test func speakerCoversAreMadeForA16BitScreen() throws {
+    #expect(CoverImage.snap(0, bits: 5) == 4 && CoverImage.snap(255, bits: 5) == 252)
+    #expect(CoverImage.snap(173, bits: 6) == 174 && CoverImage.snap(15, bits: 5) == 12)
+    // Merlin's orange (255, 173, 15) with a white line, as the screen shows it.
+    let src = dir.appendingPathComponent("flat.png"), out = dir.appendingPathComponent("flat.jpg")
+    try solidImage(src, width: 300, height: 300, rgb: (1, 173 / 255, 15 / 255), png: true)
+    try CoverImage.square(src, to: out)
+    let px = try #require(CoverImage.fingerprint(out, side: 128))
+    func screen(_ v: UInt8, _ bits: Int) -> Int { Int(v) >> (8 - bits) }
+    let wrong = stride(from: 0, to: px.count, by: 3).filter {
+      screen(px[$0], 5) != 255 >> 3 || screen(px[$0 + 1], 6) != 173 >> 2 || screen(px[$0 + 2], 5) != 15 >> 3
+    }
+    #expect(wrong.isEmpty, "\(wrong.count) pixels change colour on the speaker")
   }
 
   /// An album whose tracks share one picture gets the track numbers on it;

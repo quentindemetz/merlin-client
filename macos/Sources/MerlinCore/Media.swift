@@ -165,13 +165,7 @@ public struct Media: MediaTools {
     ctx.fill(CGRect(x: 0, y: 0, width: size, height: size))
     if let text, !text.isEmpty { drawFitted(text, in: ctx, box: CGRect(x: 8, y: 8, width: size - 16, height: size - 16)) }
     guard let image = ctx.makeImage() else { throw MerlinError("can't draw cover") }
-
-    try FileManager.default.createDirectory(at: dest.deletingLastPathComponent(), withIntermediateDirectories: true)
-    guard let out = CGImageDestinationCreateWithURL(dest as CFURL, UTType.jpeg.identifier as CFString, 1, nil) else {
-      throw MerlinError("can't write \(dest.lastPathComponent)")
-    }
-    CGImageDestinationAddImage(out, image, [kCGImageDestinationLossyCompressionQuality: 0.9] as CFDictionary)
-    guard CGImageDestinationFinalize(out) else { throw MerlinError("can't write \(dest.lastPathComponent)") }
+    try CoverImage.writeSpeakerJPEG(image, to: dest)
   }
 
   static func font(_ size: CGFloat) -> CTFont {
